@@ -70,7 +70,8 @@ p:last-child { margin-bottom: 0; }
 svg { width: 24px; height: 24px; flex-shrink: 0; vertical-align: middle; }
 a { color: var(--teal); text-underline-offset: 4px; }
 a:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 3px solid var(--teal); outline-offset: 4px; }
-.login-hero h1:focus-visible, .home-header h1:focus-visible, .bell-button:focus-visible { outline-color: var(--white); }
+.bell-button:focus-visible { outline-color: var(--white); }
+[tabindex="-1"]:focus, [tabindex="-1"]:focus-visible { outline: none; }
 .skip-link { position: absolute; top: -120px; left: 16px; padding: 12px; background: var(--white); z-index: 30; }
 .skip-link:focus { top: max(8px, env(safe-area-inset-top)); }
 .school-brand { display: flex; align-items: center; gap: 16px; margin-bottom: 32px; }
