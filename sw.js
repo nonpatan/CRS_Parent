@@ -1,8 +1,9 @@
 // App files only. Never put auth responses or student data in Cache Storage.
-const CACHE = 'crs-parent-v7';
+const CACHE = 'crs-parent-v8';
 const BASE = new URL('./', self.location.href);
 const FILES = ['./', './index.html', './privacy.html', './styles.css', './app.js',
-  './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png'];
+  './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png',
+  './icons/apple-touch-icon.png'];
 const APP_URLS = new Set(FILES.map(path => new URL(path, BASE).href));
 
 self.addEventListener('install', event => {
