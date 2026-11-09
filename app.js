@@ -5,6 +5,7 @@ export const CLIENT_OPTIONS = { auth: {
 } };
 export const INSTALL_DISMISSED_KEY = 'crs-parent-install-dismissed';
 export const MONEY_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/money.js';
+export const GRADES_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/grades.js?v=20261109-2';
 
 export function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -187,7 +188,7 @@ export function schoolYearAttendance(rows, schoolDays) {
 // The same reset points as the session controller invalidate every S3 request.
 // No data, module response, or derived amount is written to persistent storage.
 export function createReadController(sb, { changed = () => {}, leavesChanged = () => {}, now = () => new Date(),
-  loadMoney = () => import(MONEY_MODULE_URL) } = {}) {
+  loadMoney = () => import(MONEY_MODULE_URL), loadGrades = () => import(GRADES_MODULE_URL) } = {}) {
   const state = { children: {}, feed: resource(), calendar: resource(), schoolDays: null,
     money: null, moneyLoading: false, today: bangkokDate(now()), loading: false, loadedAt: {} };
   let version = 0;
@@ -207,7 +208,8 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
     state.today = bangkokDate(now()); state.loading = true;
     if (!quiet) {
       state.moneyLoading = true;
-      for (const child of children) state.children[child.student_id] = { attendance: resource(), savings: resource(), payments: resource(), leaves: resource() };
+      for (const child of children) state.children[child.student_id] = { attendance: resource(), savings: resource(), payments: resource(), leaves: resource(),
+        grades: { secondary: isSecondary(child), started: false, terms: resource(), selected: '', entries: new Map() } };
       changed();
     }
     async function fetchRows(target, name, args, selectRows = rows => rows) {
@@ -272,6 +274,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       }),
         fetchRows(target.leaves, 'my_leave_requests', args), fetchRows(target.savings, 'child_savings', args));
       if (page === 'all' || page === 'child') jobs.push(fetchRows(target.payments, 'child_payments', { ...args, p_limit: 50 }));
+      if (quiet && page === 'child' && target.grades.secondary) jobs.push(loadGradeTerms(child.student_id, { force: true }));
     }
     await Promise.allSettled(jobs);
     if (version !== ownVersion) return;
@@ -297,7 +300,110 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       if (version === ownVersion && revisions.get(target) === revision) target.error = 'โหลดใบลาไม่สำเร็จ ตรวจอินเทอร์เน็ตแล้วลองใหม่';
     } finally { if (version === ownVersion && revisions.get(target) === revision) { target.loading = false; changed(); } }
   }
-  return { state, load, reset, loadLeaves };
+  async function selectGradeTerm(studentId, key) {
+    const grades = state.children[studentId]?.grades;
+    const term = grades?.terms.rows.find(row => gradeTermKey(row) === key);
+    if (!grades?.secondary || !term) return;
+    grades.selected = key;
+    // คงชิปและโฟกัสระหว่างรีเฟรช แล้วโหลดภาคล่าสุดที่ผู้ใช้เลือก
+    if (grades.terms.loading) { changed(); return; }
+    if (grades.entries.has(key)) { changed(); return; }
+    const entry = { loading: true, error: '', released: false, release_date: term.release_date };
+    grades.entries.set(key, entry);
+    const ownVersion = version;
+    const current = () => version === ownVersion && grades.entries.get(key) === entry;
+    changed();
+    try {
+      // ภาคที่ยังไม่ประกาศไม่ขอคะแนนและไม่โหลดโมดูลคำนวณ
+      if (term.released !== true) return;
+      const { data, error } = await sb.rpc('child_grade_data', {
+        p_student_id: studentId, p_year: term.year, p_term: term.term,
+      });
+      if (!current()) return;
+      if (error || !data || typeof data.released !== 'boolean') throw Error('Invalid grades');
+      if (!data.released) { entry.release_date = data.release_date; return; }
+      if (String(data.student_id) !== String(studentId)) throw Error('Invalid student');
+      const module = await loadGrades();
+      if (!current()) return;
+      const input = module.fromGradeRpc(data);
+      if (!input) throw Error('Invalid grade payload');
+      const subjects = module.assembleStudentResults(input).get(data.student_id)?.subjects;
+      if (!Array.isArray(subjects)) throw Error('Invalid results');
+      // เก็บเฉพาะข้อมูลแสดงผลในหน่วยความจำ ไม่เก็บคะแนนดิบหรือบันทึกภายใน
+      const gpa = module.computeGpa(subjects);
+      entry.gpa = { pending: gpa.pending, gpa: gpa.gpa, pendingReason: gpa.pendingReason };
+      entry.subjects = subjects.map(subject => ({
+        code: subject.subject.code, name: subject.subject.name, credits: subject.creditInfo?.credits,
+        score: module.subjectTotalScore(subject), complete: subject.scoring?.complete !== false,
+        type: subject.result.type, grade: subject.result.grade,
+      }));
+      entry.released = true;
+    } catch {
+      if (current()) entry.error = 'ยังแสดงผลการเรียนไม่ได้ ลองใหม่';
+    } finally {
+      if (current()) { entry.loading = false; changed(); }
+    }
+  }
+  async function loadGradeTerms(studentId, { force = false } = {}) {
+    const grades = state.children[studentId]?.grades;
+    if (!grades?.secondary || (grades.started && !force)) return;
+    grades.started = true;
+    const ownVersion = version, revision = (revisions.get(grades) || 0) + 1;
+    revisions.set(grades, revision);
+    const current = () => version === ownVersion && revisions.get(grades) === revision;
+    grades.terms.loading = true; grades.terms.error = '';
+    // ล้างแคชทุกภาคและกันคำตอบเก่าที่ยังเดินทางอยู่ก่อนรีเฟรช
+    grades.entries.clear(); changed();
+    try {
+      const { data, error } = await sb.rpc('child_grade_terms', { p_student_id: studentId });
+      if (!current()) return;
+      if (error || !Array.isArray(data) || data.some(row => !row || !row.year || !row.term ||
+          typeof row.released !== 'boolean' || !validSchoolDate(row.release_date))) throw Error('Invalid terms');
+      grades.terms.rows = data.slice().sort((a, b) => Number(b.year) - Number(a.year) || Number(b.term) - Number(a.term));
+      if (!data.some(row => gradeTermKey(row) === grades.selected)) grades.selected = grades.terms.rows[0] ? gradeTermKey(grades.terms.rows[0]) : '';
+      grades.terms.loading = false;
+      if (grades.selected) await selectGradeTerm(studentId, grades.selected);
+    } catch {
+      if (current()) grades.terms.error = 'ยังแสดงผลการเรียนไม่ได้ ลองใหม่';
+    } finally {
+      if (current()) { grades.terms.loading = false; changed(); }
+    }
+  }
+  return { state, load, reset, loadLeaves, loadGrades: loadGradeTerms, selectGradeTerm };
+}
+
+function isSecondary(child) { return /^ม\./.test(child?.grade_level || ''); }
+function gradeTermKey(term) { return `${term.year}/${term.term}`; }
+
+export function gradesMarkup(child, grades) {
+  if (!isSecondary(child)) return `<p class="data-status">${String(child?.grade_level || '').startsWith('ป.')
+    ? 'ผลการเรียนชั้นประถมจะเปิดให้ดูในแอปเร็ว ๆ นี้' : 'ผลการเรียนระดับชั้นนี้จะเปิดให้ดูในแอปเร็ว ๆ นี้'}</p>`;
+  const retry = message => `<p class="field-error" role="alert">${escapeHtml(message)}</p><button id="retry-grades" class="button quiet">ลองใหม่</button>`;
+  const loading = `<p class="data-status" role="status">${busyIcon()}กำลังโหลดผลการเรียน…</p>`;
+  if (!grades || (grades.terms.loading && !grades.terms.rows.length)) return loading;
+  if (grades.terms.error) return retry(grades.terms.error);
+  if (!grades.terms.rows.length) return '<p class="data-status">ยังไม่มีการประกาศผลการเรียน</p>';
+  const chips = `<div class="grade-terms" role="group" aria-label="เลือกภาคเรียน">${grades.terms.rows.map((row, index) =>
+    `<button id="grade-term-${index}" class="filter-chip" data-grade-term="${escapeHtml(gradeTermKey(row))}" aria-pressed="${grades.selected === gradeTermKey(row)}">${escapeHtml(row.term)}/${escapeHtml(row.year)}</button>`).join('')}</div>`;
+  if (grades.terms.loading) return chips + loading;
+  const entry = grades.entries.get(grades.selected), term = grades.terms.rows.find(row => gradeTermKey(row) === grades.selected);
+  if (!entry || entry.loading) return chips + loading;
+  if (entry.error) return chips + retry(entry.error);
+  if (!entry.released) return chips + `<p class="data-status">${validSchoolDate(entry.release_date)
+    ? `ประกาศผลภาคเรียนที่ ${escapeHtml(term.term)}/${escapeHtml(term.year)} วันที่ ${escapeHtml(thaiDate(entry.release_date))}`
+    : 'ยังไม่มีการประกาศผลการเรียน'}</p>`;
+  const gpa = entry.gpa;
+  return chips + `<div class="grade-average"><h3>เกรดเฉลี่ยภาคเรียน</h3>${gpa.pending
+    ? `<p>ยังสรุปเกรดเฉลี่ยไม่ได้</p><p class="helper">${escapeHtml(gpa.pendingReason)}</p>`
+    : `<strong>${Number.isFinite(gpa.gpa) ? gpa.gpa.toFixed(2) : '—'}</strong>`}</div>
+    ${entry.subjects.length ? `<ul class="grade-subjects" aria-label="ผลการเรียนรายวิชา">${entry.subjects.map(subject => {
+      const blocked = ['ร.', 'มส.'].includes(subject.type);
+      return `<li><p class="grade-code">${escapeHtml(subject.code)}</p><h3>${escapeHtml(subject.name)}</h3>
+        <p class="helper">หน่วยกิต ${escapeHtml(subject.credits ?? '—')}</p><div class="grade-values"><p>คะแนนรวม <strong>${Number.isFinite(subject.score) ? `${escapeHtml(subject.score)} / 100` : '—'}</strong></p>
+        <p>เกรด <strong class="${blocked || !subject.complete ? 'grade-warning' : ''}">${escapeHtml(blocked ? subject.type : !subject.complete ? 'ยังไม่ครบ' : subject.grade ?? '—')}</strong></p></div>
+        ${blocked ? '<p class="helper">ติดต่อครูประจำวิชา</p>' : ''}</li>`;
+    }).join('')}</ul>` : '<p class="data-status">ยังไม่มีผลรายวิชา</p>'}
+    <p class="helper">ผลอาจเปลี่ยนได้หากครูแก้ไขคะแนน</p>`;
 }
 
 export function savingsBalance(data, money) {
@@ -423,7 +529,7 @@ export function calendarMarkup(data) {
 // All student data stays in this controller's memory. Epochs discard responses
 // from a previous account/sign-out, including an invite redeemed in another tab.
 export function createController(sb, { changed = () => {}, hash = () => '', redirectTo = '', defer = fn => setTimeout(fn, 0),
-  now = () => new Date(), loadMoney, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  now = () => new Date(), loadMoney, loadGrades, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   const state = {
     session: null, children: [], loaded: false, loading: false, loadError: '',
     code: '', redeemError: '', redeemBusy: false, lockedUntil: 0,
@@ -434,7 +540,7 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
   const notify = () => { if (!stopped) changed(state, routeFor(state, hash())); };
   let noticeTimer;
   function clearResumeNotice() { clearTimer(noticeTimer); state.resumeNotice = ''; }
-  const reads = createReadController(sb, { changed: notify, now, loadMoney, leavesChanged(messages) {
+  const reads = createReadController(sb, { changed: notify, now, loadMoney, loadGrades, leavesChanged(messages) {
     if (stopped || !state.session || state.signoutBusy || routeFor(state, hash()) === 'leave') return;
     clearResumeNotice(); state.success = ''; state.resumeNotice = messages.join(' · ');
     noticeTimer = setTimer(() => { state.resumeNotice = ''; notify(); }, 5000);
@@ -616,6 +722,8 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
     beginLeave(id) { if (ownsChild(id) && state.leaveDraft?.studentId !== String(id)) { state.leaveDraft = newLeaveDraft(id); state.leaveError = ''; } },
     discardLeave() { resetLeave(); },
     loadLeaves(id) { if (ownsChild(id)) return reads.loadLeaves(id); },
+    loadGrades(id, options) { if (ownsChild(id)) return reads.loadGrades(id, options); },
+    selectGradeTerm(id, key) { if (ownsChild(id)) return reads.selectGradeTerm(id, key); },
     loadData() { if (state.session && !state.signoutBusy && state.loaded) { resetLeave(); return reads.load(state.children); } },
     stop() { stopped = true; epoch++; request++; subscription?.unsubscribe(); clearPrivateState(); state.session = null; },
   };
@@ -903,9 +1011,15 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
       } else {
         main.innerHTML = `<section class="screen-page child-screen"><a class="button quiet detail-back" href="#home">${icon('back')}กลับหน้าแรก</a><h1 tabindex="-1">${escapeHtml(child.name)}</h1><p class="muted">${escapeHtml(classLabel(child))}</p>
           <section class="data-card" aria-busy="${!data || data.attendance.loading}"><h2>การมาเรียน</h2>${resourceMarkup(data?.attendance) || attendanceMarkup(data.attendance.rows, detailMonth, s.read.today, s.read.schoolDays)}</section>
+          <section class="data-card" aria-labelledby="grades-heading" aria-busy="${isSecondary(child) && (!data || data.grades.terms.loading || !!data.grades.entries.get(data.grades.selected)?.loading)}"><h2 id="grades-heading">ผลการเรียน</h2>${gradesMarkup(child, data?.grades)}</section>
           <section class="data-card" aria-busy="${!data || data.leaves.loading || !!s.cancelBusyId}"><h2 id="leave-heading" tabindex="-1">ใบลา</h2><a class="button primary full" href="#leave/${encodeURIComponent(id)}">ยื่นใบลา</a>${leaveListMarkup(data?.leaves, s.cancelBusyId)}<p class="field-error" role="alert">${escapeHtml(s.cancelError)}</p><button type="button" id="reload-leaves" class="button secondary">โหลดรายการใบลาอีกครั้ง</button></section>
           <section class="data-card" aria-busy="${!data || data.savings.loading || s.read.moneyLoading}"><h2>เงินออม</h2>${savingsMarkup(data?.savings, s.read.money, expandedSavings, s.read.moneyLoading)}</section>
           <section class="data-card" aria-busy="${!data || data.payments.loading}"><h2>ประวัติการชำระ</h2>${paymentsMarkup(data?.payments)}</section></section>`;
+        if (data && isSecondary(child) && !data.grades.started) void Promise.resolve().then(() => controller.loadGrades(id));
+        main.querySelectorAll('[data-grade-term]').forEach(button => button.addEventListener('click', () => {
+          void controller.selectGradeTerm(id, button.dataset.gradeTerm);
+        }));
+        main.querySelector('#retry-grades')?.addEventListener('click', () => { void controller.loadGrades(id, { force: true }); });
         main.querySelector('#reload-leaves').addEventListener('click', () => { void controller.loadLeaves(id); });
         main.querySelectorAll('.cancel-leave').forEach(button => button.addEventListener('click', async () => {
           const record = s.read.children[id];

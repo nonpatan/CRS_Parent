@@ -199,6 +199,21 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 .data-status { color: var(--muted); padding-block: 16px; }
 .data-card, .calendar-card { background: var(--white); padding: 18px; border-radius: 20px; margin-top: 16px; box-shadow: var(--shadow); }
 .data-card h2 { font-size: 1.125rem; }
+.grade-terms { display: flex; flex-wrap: wrap; gap: 8px; margin-block: 16px; }
+.grade-terms .filter-chip { min-width: 44px; min-height: 44px; white-space: normal; overflow-wrap: anywhere; color: var(--ink); background: var(--bg); border: 1px solid var(--line); }
+.grade-terms .filter-chip[aria-pressed="true"] { color: var(--teal); background: var(--teal-soft); border-color: var(--teal); box-shadow: none; }
+.grade-terms .filter-chip:focus-visible { outline-color: var(--teal); }
+.grade-average { margin-block: 20px; font-variant-numeric: tabular-nums; }
+.grade-average h3 { color: var(--muted); }
+.grade-average > strong { font-size: 2rem; color: var(--teal); }
+.grade-average p { margin-bottom: 4px; }
+.grade-subjects { list-style: none; padding: 0; margin: 0; font-variant-numeric: tabular-nums; }
+.grade-subjects li { min-width: 0; padding-block: 16px; border-top: 1px solid var(--line); }
+.grade-subjects h3 { margin-bottom: 4px; }
+.grade-subjects .grade-code { color: var(--muted); font-size: .8125rem; margin-bottom: 4px; }
+.grade-values { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 12px; }
+.grade-values p { margin: 0; }
+.grade-warning { display: inline-block; padding: 2px 8px; color: var(--amber); background: var(--amber-soft); border-radius: 8px; }
 .detail-back { margin-bottom: 18px; }
 .child-screen { padding-top: calc(env(safe-area-inset-top) + 20px); }
 .month-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 16px 0; }
