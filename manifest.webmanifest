@@ -1,7 +1,7 @@
 {
   "id": "./",
-  "name": "CRS ผู้ปกครอง โรงเรียนเจริญศึกษา",
-  "short_name": "CRS ผู้ปกครอง",
+  "name": "CRS MIS (ผู้ปกครอง-นักเรียน)",
+  "short_name": "CRS MIS",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

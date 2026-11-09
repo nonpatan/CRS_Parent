@@ -808,16 +808,17 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
     success.hidden = !(s.resumeNotice || s.success); success.textContent = s.resumeNotice || s.success;
     main.setAttribute('aria-busy', String(route === 'loading' || s.redeemBusy || s.leaveBusy));
     if (route === 'login') {
-      doc.title = 'แอปผู้ปกครอง — โรงเรียนเจริญศึกษา';
+      doc.title = 'CRS MIS (ผู้ปกครอง-นักเรียน) — โรงเรียนเจริญศึกษา';
       main.innerHTML = `<section class="login-screen"><div class="login-hero"><div class="crest"><img src="./icons/icon-192.png" alt="ตราโรงเรียนเจริญศึกษา" width="80" height="80"></div>
-        <p class="school">โรงเรียนเจริญศึกษา</p><h1 tabindex="-1">แอปผู้ปกครอง</h1><p class="tagline">ติดตามลูกได้ทุกวัน ในมือถือของคุณ</p></div>
+        <p class="school">โรงเรียนเจริญศึกษา</p><h1 tabindex="-1"><span class="login-title">CRS MIS</span> <span class="login-subtitle">ผู้ปกครอง-นักเรียน</span></h1><p class="tagline">ติดตามลูกได้ทุกวัน ในมือถือของคุณ</p></div>
         <div class="login-sheet"><ul class="features">
           <li><span class="feature-icon">${icon('attendance')}</span><div><strong>การมาเรียนรายวัน</strong><p>มา สาย ขาด ลา เห็นทันทีที่ครูเช็คชื่อ</p></div></li>
           <li><span class="feature-icon">${icon('wallet')}</span><div><strong>เงินออมและค่าใช้จ่าย</strong><p>ยอดออม ใบเสร็จ ใบแจ้งค่าธรรมเนียม</p></div></li>
           <li><span class="feature-icon">${icon('bell')}</span><div><strong>แจ้งเตือนสำคัญ</strong><p>ลูกขาดเรียน ผลใบลา ใบแจ้งหนี้ออก</p></div></li></ul>
         <button id="google-login" class="button google full" ${s.loginBusy ? 'disabled' : ''} aria-describedby="login-error">${googleIcon}<span>${s.loginBusy ? 'กำลังไปหน้า Google…' : 'เข้าสู่ระบบด้วย Google'}</span></button>
         <p id="login-error" class="field-error" role="alert">${escapeHtml(s.loginError)}</p>
-        <p class="login-fine">ครั้งแรกต้องใช้รหัสจากครูประจำชั้น · <a href="./privacy.html">นโยบายความเป็นส่วนตัว</a></p></div></section>`;
+        <p class="login-fine">ครั้งแรกต้องใช้รหัสจากครูประจำชั้น · <a href="./privacy.html">นโยบายความเป็นส่วนตัว</a></p>
+        <p class="login-developer">ผู้พัฒนา: ผอ.อานนท์ ปัญจเมธีกุล · <a href="mailto:nonpatan@gmail.com">nonpatan@gmail.com</a></p></div></section>`;
       main.querySelector('#google-login').addEventListener('click', controller.signIn);
     } else if (route === 'loading') {
       main.innerHTML = `<section class="panel"><h1 tabindex="-1">${s.signoutBusy ? 'กำลังออกจากระบบ…' : 'กำลังโหลดรายชื่อลูก…'}</h1><p class="muted" role="status">กรุณารอสักครู่</p></section>`;
@@ -825,7 +826,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
       main.innerHTML = `<section class="panel"><h1 tabindex="-1">ยังเปิดรายชื่อลูกไม่ได้</h1><p class="notice error" role="alert">${escapeHtml(s.loadError)}</p><button id="retry-children" class="button primary full">ลองใหม่</button></section>`;
       main.querySelector('#retry-children').addEventListener('click', controller.loadChildren);
     } else if (route === 'redeem') {
-      doc.title = 'กรอกรหัสจากครูประจำชั้น — CRS ผู้ปกครอง';
+      doc.title = 'กรอกรหัสจากครูประจำชั้น — CRS MIS';
       const locked = s.lockedUntil > Date.now();
       main.innerHTML = `<div class="steps" role="img" aria-label="ขั้นที่ 2 จาก 3"><span></span><span></span><span class="step-next"></span></div>
         <section class="screen-page redeem-screen"><h1 tabindex="-1">กรอกรหัสจากครูประจำชั้น</h1>
@@ -857,7 +858,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         }
       });
     } else if (route === 'home') {
-      doc.title = 'หน้าแรก — CRS ผู้ปกครอง';
+      doc.title = 'หน้าแรก — CRS MIS';
       const summary = homeSummary(filterChildren(s.children, selectedChildId), s.read);
       const feed = splitFeed(s.read.feed.rows, s.children, selectedChildId, s.read.today);
       main.innerHTML = `<section><header class="home-header"><div class="home-greeting"><div><p class="today-date">${escapeHtml(thaiToday())}</p><h1 tabindex="-1">${escapeHtml(guardianGreeting(s.children))}</h1></div>
@@ -894,7 +895,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
       const child = s.children.find(row => String(row.student_id) === id);
       const data = s.read.children[id];
       if (detailChildId !== id) { detailChildId = id; detailMonth = s.read.today.slice(0, 7); expandedSavings = false; }
-      doc.title = `${child?.name || 'ไม่พบข้อมูลลูก'} — CRS ผู้ปกครอง`;
+      doc.title = `${child?.name || 'ไม่พบข้อมูลลูก'} — CRS MIS`;
       if (!child) {
         main.innerHTML = '<section class="screen-page"><h1 tabindex="-1">ไม่พบข้อมูลลูก</h1><p class="muted">บัญชีนี้ยังไม่ได้ผูกกับนักเรียนที่ระบุ</p><a class="button secondary" href="#home">กลับหน้าแรก</a></section>';
       } else {
@@ -920,7 +921,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
       let id = '';
       try { id = decodeURIComponent(win.location.hash.slice('#leave/'.length)); } catch { /* แสดงหน้าข้อมูลลูกไม่พบ */ }
       const child = s.children.find(row => String(row.student_id) === id);
-      doc.title = 'ยื่นใบลา — CRS ผู้ปกครอง';
+      doc.title = 'ยื่นใบลา — CRS MIS';
       if (!child) {
         main.innerHTML = '<section class="screen-page"><h1 tabindex="-1">ไม่พบข้อมูลลูก</h1><p class="muted">บัญชีนี้ยังไม่ได้ผูกกับนักเรียนที่ระบุ</p><a class="button secondary" href="#home">กลับหน้าแรก</a></section>';
       } else {
@@ -970,16 +971,16 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         }));
       }
     } else if (route === 'calendar') {
-      doc.title = 'ปฏิทิน — CRS ผู้ปกครอง';
-      main.innerHTML = `<section class="screen-page"><p class="eyebrow">CRS ผู้ปกครอง</p><h1 tabindex="-1">ปฏิทิน</h1><div aria-busy="${s.read.calendar.loading}">${calendarMarkup(s.read.calendar)}</div></section>`;
+      doc.title = 'ปฏิทิน — CRS MIS';
+      main.innerHTML = `<section class="screen-page"><p class="eyebrow">CRS MIS</p><h1 tabindex="-1">ปฏิทิน</h1><div aria-busy="${s.read.calendar.loading}">${calendarMarkup(s.read.calendar)}</div></section>`;
     } else if (route === 'notifications') {
       const title = 'แจ้งเตือน';
-      doc.title = `${title} — CRS ผู้ปกครอง`;
-      main.innerHTML = `<section class="screen-page"><p class="eyebrow">CRS ผู้ปกครอง</p><h1 tabindex="-1">${title}</h1>
+      doc.title = `${title} — CRS MIS`;
+      main.innerHTML = `<section class="screen-page"><p class="eyebrow">CRS MIS</p><h1 tabindex="-1">${title}</h1>
         <div class="empty-page"><span class="empty-icon">${icon('bell')}</span><h2>แจ้งเตือนจะเปิดให้ดูเร็ว ๆ นี้</h2><p>เมื่อลูกขาดเรียน มีผลใบลา หรือมีใบแจ้งหนี้ จะแสดงที่นี่</p></div></section>`;
     } else if (route === 'account') {
-      doc.title = 'บัญชี — CRS ผู้ปกครอง';
-      main.innerHTML = `<section class="screen-page account-screen"><p class="eyebrow">CRS ผู้ปกครอง</p><h1 tabindex="-1">บัญชี</h1>
+      doc.title = 'บัญชี — CRS MIS';
+      main.innerHTML = `<section class="screen-page account-screen"><p class="eyebrow">CRS MIS</p><h1 tabindex="-1">บัญชี</h1>
         <div class="account-card"><span class="account-avatar">${icon('account')}</span><div><h2>บัญชีที่ใช้อยู่</h2><p class="account-email">${escapeHtml(s.session.user.email || 'ไม่พบอีเมลของบัญชี')}</p></div></div>
         <h2 class="section-title">ลูกที่ผูกกับบัญชี</h2><ul class="linked-children">${s.children.map((child, index) => `<li><span class="avatar tone-${childTone(index)}" aria-hidden="true">${escapeHtml(childInitials(child.name))}</span><div><strong>${escapeHtml(child.name)}</strong><p>คุณเป็น ${escapeHtml(child.relation)}</p></div></li>`).join('')}</ul>
         <a class="privacy-link" href="./privacy.html">นโยบายความเป็นส่วนตัว</a>

@@ -1,5 +1,5 @@
 // App files only. Never put auth responses or student data in Cache Storage.
-const CACHE = 'crs-parent-v6';
+const CACHE = 'crs-parent-v7';
 const BASE = new URL('./', self.location.href);
 const FILES = ['./', './index.html', './privacy.html', './styles.css', './app.js',
   './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png'];

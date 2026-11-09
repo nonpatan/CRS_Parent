@@ -97,6 +97,8 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 .crest img { width: 80px; height: 80px; border-radius: 50%; }
 .login-hero .school { font-size: .9375rem; margin: 0; }
 .login-hero h1 { font-size: 1.875rem; line-height: 1.25; margin: 4px 0 10px; }
+.login-title { display: block; font-weight: 700; letter-spacing: .04em; }
+.login-subtitle { display: block; margin-top: 6px; font-size: 1.125rem; line-height: 1.5; font-weight: 500; }
 .tagline { margin: 0; max-width: 270px; }
 .login-sheet { background: var(--white); border-radius: 28px 28px 0 0; margin-top: -28px; position: relative; padding: 24px max(22px, env(safe-area-inset-right)) max(28px, env(safe-area-inset-bottom)) max(22px, env(safe-area-inset-left)); }
 .features { list-style: none; padding: 0; margin: 0 0 24px; display: grid; gap: 16px; }
@@ -107,6 +109,8 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 .features p { font-size: .8125rem; color: var(--muted); margin: 0; }
 .login-fine { margin: 14px 0 0; text-align: center; font-size: .8125rem; color: var(--muted); }
 .login-fine a { display: inline-flex; align-items: center; min-height: 44px; }
+.login-developer { margin: 12px 0 0; text-align: center; font-size: .75rem; color: var(--muted); }
+.login-developer a { display: inline-flex; align-items: center; min-height: 44px; color: inherit; }
 /* เชื่อมบัญชี: ช่องกรอกรหัสจริงในบัตรเส้นประ */
 .account-bar { display: flex; align-items: center; gap: 12px; padding: max(16px, env(safe-area-inset-top)) 18px 16px; background: var(--white); border-bottom: 1px solid var(--line); }
 .account-info { min-width: 0; flex: 1; }
