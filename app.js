@@ -399,7 +399,7 @@ export function gradesMarkup(child, grades) {
     ${entry.subjects.length ? `<ul class="grade-subjects" aria-label="ผลการเรียนรายวิชา">${entry.subjects.map(subject => {
       const blocked = ['ร.', 'มส.'].includes(subject.type);
       return `<li><p class="grade-code">${escapeHtml(subject.code)}</p><h3>${escapeHtml(subject.name)}</h3>
-        <p class="helper">หน่วยกิต ${escapeHtml(subject.credits ?? '—')}</p><div class="grade-values"><p>คะแนนรวม <strong>${Number.isFinite(subject.score) ? `${escapeHtml(subject.score)} / 100` : '—'}</strong></p>
+        <p class="helper">หน่วยกิต ${escapeHtml(subject.credits ?? '—')}</p><div class="grade-values"><p>คะแนนรวม <strong>${Number.isFinite(subject.score) ? `${escapeHtml(subject.score.toFixed(2))} / 100` : '—'}</strong></p>
         <p>เกรด <strong class="${blocked || !subject.complete ? 'grade-warning' : ''}">${escapeHtml(blocked ? subject.type : !subject.complete ? 'ยังไม่ครบ' : subject.grade ?? '—')}</strong></p></div>
         ${blocked ? '<p class="helper">ติดต่อครูประจำวิชา</p>' : ''}</li>`;
     }).join('')}</ul>` : '<p class="data-status">ยังไม่มีผลรายวิชา</p>'}
