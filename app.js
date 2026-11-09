@@ -150,7 +150,7 @@ export function leaveListMarkup(data, busyId = '') {
     <p>${escapeHtml(thaiDate(row.start_date))}${row.end_date !== row.start_date ? ` – ${escapeHtml(thaiDate(row.end_date))}` : ''}</p>
     <p class="leave-reason">${escapeHtml(row.reason)}</p>
     ${row.decision_note ? `<p class="teacher-note">ข้อความจากครู: ${escapeHtml(row.decision_note)}</p>` : ''}
-    ${row.status === 'รออนุมัติ' ? `<button type="button" class="button danger cancel-leave" id="cancel-${escapeHtml(row.id)}" data-id="${escapeHtml(row.id)}" ${busyId ? 'disabled' : ''}>${busyId === row.id ? 'กำลังยกเลิก…' : 'ยกเลิกใบลา'}</button>` : ''}</li>`).join('')}</ul>`;
+    ${row.status === 'รออนุมัติ' ? `<button type="button" class="button danger cancel-leave" id="cancel-${escapeHtml(row.id)}" data-id="${escapeHtml(row.id)}" ${busyId ? 'disabled' : ''}>${busyId === row.id ? `${busyIcon()}กำลังยกเลิก…` : 'ยกเลิกใบลา'}</button>` : ''}</li>`).join('')}</ul>`;
 }
 export function leaveFormMarkup(draft, metadata, busy = false, error = '', today = bangkokDate()) {
   const { min, max } = leaveDateLimits(today), errors = draft.errors;
@@ -165,7 +165,7 @@ export function leaveFormMarkup(draft, metadata, busy = false, error = '', today
     <p id="leave-day-count" class="helper" role="status">${count === null ? 'เลือกช่วงวันลาไม่เกิน 14 วันเพื่อดูจำนวนวันเรียน' : `รวม ${count} วันเรียน${metadata ? '' : ' (ยังไม่หักวันหยุดโรงเรียน เพราะยังโหลดข้อมูลวันหยุดไม่ได้)'}`}</p>
     ${count === 0 ? '<p class="leave-warning" role="status">ช่วงนี้มีแต่วันหยุด กรุณาตรวจวันที่ก่อนส่งใบลา</p>' : ''}
     <div class="field"><label for="leave-reason">เหตุผล (จำเป็น)</label><textarea id="leave-reason" name="reason" rows="4" maxlength="500" required ${attrs('reason')} ${busy ? 'disabled' : ''}>${escapeHtml(draft.reason)}</textarea><p id="reason-helper" class="helper">เช่น มีไข้ ไปพบแพทย์</p><p id="reason-count" class="helper">${Array.from(draft.reason).length}/500 ตัวอักษร</p>${fieldError('reason')}</div>
-    <button id="submit-leave" class="button primary full" ${busy ? 'disabled' : ''}>${busy ? 'กำลังส่ง…' : 'ส่งใบลา'}</button>
+    <button id="submit-leave" class="button primary full" ${busy ? 'disabled' : ''}>${busy ? `${busyIcon()}กำลังส่ง…` : 'ส่งใบลา'}</button>
     <p id="leave-error" class="field-error" role="alert">${escapeHtml(error)}</p>
     <p class="helper">ถ้าเร่งด่วน โทรแจ้งครูประจำชั้นได้ตามเดิม</p></form>`;
 }
@@ -392,7 +392,7 @@ export function attendanceMarkup(rows, month, today, schoolDays = null) {
 }
 
 function resourceMarkup(data) {
-  if (!data || data.loading) return '<p class="data-status" role="status">กำลังโหลดข้อมูล…</p>';
+  if (!data || data.loading) return `<p class="data-status" role="status">${busyIcon()}กำลังโหลดข้อมูล…</p>`;
   if (data.error) return `<p class="field-error" role="alert">${escapeHtml(data.error)}</p><button class="button quiet retry-data">ลองใหม่</button>`;
   return '';
 }
@@ -401,7 +401,7 @@ export function savingsMarkup(data, money, expanded = false, moneyLoading = fals
   if (unavailable) return unavailable;
   const balance = savingsBalance(data, money);
   const rows = data.rows.slice().reverse();
-  return `<p class="savings-balance">${moneyLoading ? 'กำลังโหลด…' : balance === null ? 'ยังแสดงยอดไม่ได้' : escapeHtml(baht(balance))}</p>${balance === null && !moneyLoading ? '<p class="muted">ยอดคงเหลือยังไม่พร้อมแสดง คุณยังดูรายการเงินออมได้</p><button class="button quiet retry-data">ลองใหม่</button>' : ''}
+  return `<p class="savings-balance">${moneyLoading ? `${busyIcon()}กำลังโหลด…` : balance === null ? 'ยังแสดงยอดไม่ได้' : escapeHtml(baht(balance))}</p>${balance === null && !moneyLoading ? '<p class="muted">ยอดคงเหลือยังไม่พร้อมแสดง คุณยังดูรายการเงินออมได้</p><button class="button quiet retry-data">ลองใหม่</button>' : ''}
     ${rows.length ? `<ol class="transaction-list">${(expanded ? rows : rows.slice(0, 10)).map(row => `<li><div><strong>${escapeHtml(row.kind)}</strong><time datetime="${escapeHtml(row.txn_date)}">${escapeHtml(thaiDate(row.txn_date))}</time></div><strong>${escapeHtml(baht(row.amount))}</strong></li>`).join('')}</ol>${rows.length > 10 ? `<button id="expand-savings" class="button quiet full" aria-expanded="${expanded}">${expanded ? 'แสดงล่าสุด 10 รายการ' : 'ดูทั้งหมด'}</button>` : ''}` : '<p class="muted">ยังไม่มีรายการเงินออม</p>'}`;
 }
 export function paymentsMarkup(data) {
@@ -637,6 +637,7 @@ export function registerResumeRefresh(controller, win, doc, updates = null) {
 }
 
 const icons = {
+  hourglass: '<path d="M6 3h12M6 21h12M7 3c0 5 5 6 5 9s-5 4-5 9M17 3c0 5-5 6-5 9s5 4 5 9"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   close: '<path d="m6 6 12 12M6 18 18 6"/>',
   share: '<path d="M12 15V3m-4 4 4-4 4 4M5 11v10h14V11"/>',
@@ -656,6 +657,7 @@ const icons = {
   activity: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
 };
 function icon(name) { return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name]}</svg>`; }
+function busyIcon() { return `<span class="busy-icon">${icon('hourglass')}</span>`; }
 // Google's standard multicolour G, kept in its original proportions and colours.
 const googleIcon = `<svg viewBox="0 0 48 48" width="20" height="20" aria-hidden="true"><path fill="var(--google-red)" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="var(--google-blue)" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="var(--google-yellow)" d="M10.53 28.59A14.4 14.4 0 0 1 9.75 24c0-1.59.27-3.13.76-4.59l-7.98-6.19A23.87 23.87 0 0 0 0 24c0 3.87.93 7.53 2.56 10.78l7.97-6.19z"/><path fill="var(--google-green)" d="M24 48c6.48 0 11.93-2.13 15.91-5.8l-7.73-6c-2.15 1.45-4.92 2.3-8.18 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>`;
 
@@ -728,7 +730,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
     if (!kind) return '';
     return `<aside class="install-banner" aria-label="แนะนำติดตั้งแอป">
       <div class="install-heading"><span class="install-icon" aria-hidden="true">${icon('phone')}</span><div class="install-copy"><h2>เพิ่มลงหน้าจอหลัก</h2><p class="helper">เพื่อรับแจ้งเตือนเมื่อลูกขาดเรียน</p></div><button id="dismiss-install" class="button quiet install-dismiss" aria-label="ปิดคำแนะนำติดตั้งแอป">${icon('close')}</button></div>
-      ${kind === 'ios' ? `<ol class="install-steps"><li>แตะ ${icon('share')} แชร์ ใน Safari</li><li>เลือก ${icon('add')} เพิ่มลงในหน้าจอโฮม</li></ol>` : `<button id="install-app" class="button primary full" ${installBusy ? 'disabled' : ''}>${installBusy ? 'กำลังติดตั้ง…' : 'ติดตั้งแอป'}</button>`}
+      ${kind === 'ios' ? `<ol class="install-steps"><li>แตะ ${icon('share')} แชร์ ใน Safari</li><li>เลือก ${icon('add')} เพิ่มลงในหน้าจอโฮม</li></ol>` : `<button id="install-app" class="button primary full" ${installBusy ? 'disabled' : ''}>${installBusy ? `${busyIcon()}กำลังติดตั้ง…` : 'ติดตั้งแอป'}</button>`}
       <p class="field-error" role="alert">${escapeHtml(installError)}</p></aside>`;
   }
   function askLeaveConfirmation(title, message, action) {
@@ -801,7 +803,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
     account.classList.toggle('redeem-topbar', route === 'redeem');
     account.innerHTML = showAccountBar ? `${route === 'redeem' && s.children.length ? `<a class="button back-button" href="#home" aria-label="ย้อนกลับไปหน้าแรก">${icon('back')}</a>` : ''}
       <div class="account-info">${route === 'redeem' ? '<strong>เชื่อมกับลูกของคุณ</strong>' : '<small>บัญชีที่ใช้อยู่</small>'}<p class="account-email">${escapeHtml(s.session.user.email || 'ไม่พบอีเมลของบัญชี')}</p></div>
-      ${route !== 'redeem' || !s.children.length ? `<button id="sign-out" class="button signout" ${s.signoutBusy ? 'disabled' : ''}>${s.signoutBusy ? 'กำลังออก…' : 'ออกจากระบบ'}</button>` : ''}` : '';
+      ${route !== 'redeem' || !s.children.length ? `<button id="sign-out" class="button signout" ${s.signoutBusy ? 'disabled' : ''}>${s.signoutBusy ? `${busyIcon()}กำลังออก…` : 'ออกจากระบบ'}</button>` : ''}` : '';
     account.querySelector('#sign-out')?.addEventListener('click', controller.signOut);
     if (focusRoute && route === 'leave') { s.success = ''; s.resumeNotice = ''; }
     success.classList.toggle('resume-toast', !!s.resumeNotice);
@@ -815,13 +817,13 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
           <li><span class="feature-icon">${icon('attendance')}</span><div><strong>การมาเรียนรายวัน</strong><p>มา สาย ขาด ลา เห็นทันทีที่ครูเช็คชื่อ</p></div></li>
           <li><span class="feature-icon">${icon('wallet')}</span><div><strong>เงินออมและค่าใช้จ่าย</strong><p>ยอดออม ใบเสร็จ ใบแจ้งค่าธรรมเนียม</p></div></li>
           <li><span class="feature-icon">${icon('bell')}</span><div><strong>แจ้งเตือนสำคัญ</strong><p>ลูกขาดเรียน ผลใบลา ใบแจ้งหนี้ออก</p></div></li></ul>
-        <button id="google-login" class="button google full" ${s.loginBusy ? 'disabled' : ''} aria-describedby="login-error">${googleIcon}<span>${s.loginBusy ? 'กำลังไปหน้า Google…' : 'เข้าสู่ระบบด้วย Google'}</span></button>
+        <button id="google-login" class="button google full" ${s.loginBusy ? 'disabled' : ''} aria-describedby="login-error">${s.loginBusy ? busyIcon() : googleIcon}<span>${s.loginBusy ? 'กำลังไปหน้า Google…' : 'เข้าสู่ระบบด้วย Google'}</span></button>
         <p id="login-error" class="field-error" role="alert">${escapeHtml(s.loginError)}</p>
         <p class="login-fine">ครั้งแรกต้องใช้รหัสจากครูประจำชั้น · <a href="./privacy.html">นโยบายความเป็นส่วนตัว</a></p>
         <p class="login-developer">ผู้พัฒนา: ผอ.อานนท์ ปัญจเมธีกุล · <a href="mailto:nonpatan@gmail.com">nonpatan@gmail.com</a></p></div></section>`;
       main.querySelector('#google-login').addEventListener('click', controller.signIn);
     } else if (route === 'loading') {
-      main.innerHTML = `<section class="panel"><h1 tabindex="-1">${s.signoutBusy ? 'กำลังออกจากระบบ…' : 'กำลังโหลดรายชื่อลูก…'}</h1><p class="muted" role="status">กรุณารอสักครู่</p></section>`;
+      main.innerHTML = `<section class="panel"><h1 tabindex="-1">${busyIcon()}${s.signoutBusy ? 'กำลังออกจากระบบ…' : 'กำลังโหลดรายชื่อลูก…'}</h1><p class="muted" role="status">กรุณารอสักครู่</p></section>`;
     } else if (route === 'error') {
       main.innerHTML = `<section class="panel"><h1 tabindex="-1">ยังเปิดรายชื่อลูกไม่ได้</h1><p class="notice error" role="alert">${escapeHtml(s.loadError)}</p><button id="retry-children" class="button primary full">ลองใหม่</button></section>`;
       main.querySelector('#retry-children').addEventListener('click', controller.loadChildren);
@@ -835,7 +837,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         <input id="invite-code" name="invite-code" type="text" inputmode="text" autocapitalize="characters" autocomplete="one-time-code" spellcheck="false" placeholder="ABCD-EF__" value="${escapeHtml(s.code)}" aria-describedby="invite-help invite-error" aria-invalid="${!!s.redeemError}" ${s.redeemBusy ? 'readonly' : ''}>
         <p id="invite-help" class="helper">8 ตัว เช่น ABCD-EF23 · วางจาก LINE ได้เลย</p><p id="invite-error" class="field-error" role="alert">${escapeHtml(s.redeemError)}</p></div>
         <p class="invite-tip">${icon('info')}<span>ยังไม่มีรหัส? ขอได้จากครูประจำชั้นของลูก รหัสใช้ได้ 7 วัน</span></p>
-        <div class="actions"><button id="redeem-code" class="button primary full" ${s.redeemBusy || locked || inviteCharacters(s.code).length !== 8 ? 'disabled' : ''}>${s.redeemBusy ? 'กำลังตรวจรหัส…' : 'ยืนยันรหัส'}</button></div></form></section>`;
+        <div class="actions"><button id="redeem-code" class="button primary full" ${s.redeemBusy || locked || inviteCharacters(s.code).length !== 8 ? 'disabled' : ''}>${s.redeemBusy ? `${busyIcon()}กำลังตรวจรหัส…` : 'ยืนยันรหัส'}</button></div></form></section>`;
       const input = main.querySelector('#invite-code');
       input.addEventListener('input', event => {
         let value = input.value;
@@ -865,7 +867,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         <a class="button bell-button" href="#notifications" aria-label="ดูแจ้งเตือน">${icon('bell')}</a></div></header>
         <div class="child-filters" role="group" aria-label="กรองตามลูก"><button id="child-filter-all" class="filter-chip" aria-pressed="${selectedChildId === null}">ทุกคน</button>
         ${s.children.map((child, index) => `<button id="child-filter-${index}" class="filter-chip" data-child-id="${escapeHtml(child.student_id)}" aria-label="ดูข้อมูลของ ${escapeHtml(child.name)}" aria-pressed="${String(child.student_id) === selectedChildId}">${escapeHtml(firstName(child.nickname || child.name) || 'ลูกของฉัน')}</button>`).join('')}</div>
-        <div class="home-content"><div class="summary-grid"><div aria-busy="${summary.attendanceBusy}"><h2>มาเรียนวันนี้</h2><strong>${escapeHtml(summary.attendance)}</strong><p>${escapeHtml(summary.attendanceDetail)}</p></div><div aria-busy="${summary.savingsBusy}"><h2>เงินออมรวม</h2><strong>${escapeHtml(summary.savings)}</strong><p>ของลูกที่เลือก</p></div></div>
+        <div class="home-content"><div class="summary-grid"><div aria-busy="${summary.attendanceBusy}"><h2>มาเรียนวันนี้</h2><strong>${summary.attendanceBusy ? busyIcon() : ''}${escapeHtml(summary.attendance)}</strong><p>${escapeHtml(summary.attendanceDetail)}</p></div><div aria-busy="${summary.savingsBusy}"><h2>เงินออมรวม</h2><strong>${summary.savingsBusy ? busyIcon() : ''}${escapeHtml(summary.savings)}</strong><p>ของลูกที่เลือก</p></div></div>
         <ul class="children" aria-label="ลูกที่ผูกกับบัญชี">${filterChildren(s.children, selectedChildId).map(child => childMarkup(child, s.children.indexOf(child))).join('')}</ul>
         ${summary.attendance === 'ยังแสดงข้อมูลไม่ได้' || summary.savings === 'ยังแสดงยอดไม่ได้' ? '<button class="button quiet retry-data">ลองโหลดข้อมูลใหม่</button>' : ''}
         <section class="activity-feed" aria-labelledby="today-title" aria-busy="${s.read.feed.loading}"><h2 id="today-title">วันนี้</h2><ol id="today-feed" class="feed-list">${feedMarkup(feed.today, s.children, s.read.today)}</ol>
@@ -984,7 +986,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         <div class="account-card"><span class="account-avatar">${icon('account')}</span><div><h2>บัญชีที่ใช้อยู่</h2><p class="account-email">${escapeHtml(s.session.user.email || 'ไม่พบอีเมลของบัญชี')}</p></div></div>
         <h2 class="section-title">ลูกที่ผูกกับบัญชี</h2><ul class="linked-children">${s.children.map((child, index) => `<li><span class="avatar tone-${childTone(index)}" aria-hidden="true">${escapeHtml(childInitials(child.name))}</span><div><strong>${escapeHtml(child.name)}</strong><p>คุณเป็น ${escapeHtml(child.relation)}</p></div></li>`).join('')}</ul>
         <a class="privacy-link" href="./privacy.html">นโยบายความเป็นส่วนตัว</a>
-        <div class="signout-section"><button id="sign-out" class="button signout full" ${s.signoutBusy ? 'disabled' : ''}>${s.signoutBusy ? 'กำลังออก…' : 'ออกจากระบบ'}</button></div></section>`;
+        <div class="signout-section"><button id="sign-out" class="button signout full" ${s.signoutBusy ? 'disabled' : ''}>${s.signoutBusy ? `${busyIcon()}กำลังออก…` : 'ออกจากระบบ'}</button></div></section>`;
       main.querySelector('#sign-out').addEventListener('click', controller.signOut);
     }
     main.querySelectorAll('.retry-data').forEach(button => button.addEventListener('click', () => { void controller.loadData(); }));

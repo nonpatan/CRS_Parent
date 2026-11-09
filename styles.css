@@ -42,7 +42,7 @@ html.has-bottom-nav { scroll-padding-bottom: calc(var(--bottom-nav-height) + 16p
 body { margin: 0; min-height: 100vh; min-height: 100dvh; background: var(--bg); color: var(--ink); font-family: 'Sarabun', sans-serif; font-size: 1rem; line-height: 1.65; }
 body::before { content: ''; position: fixed; top: 0; left: 0; right: 0; height: env(safe-area-inset-top); background: var(--teal); z-index: 35; pointer-events: none; }
 body:has(.login-hero)::before { display: none; }
-.app-wrap { width: 100%; max-width: 480px; margin: 0 auto; padding: max(32px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+.app-wrap { width: 100%; max-width: 480px; margin: 0 auto; padding: calc(env(safe-area-inset-top) + 32px) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
 .app-frame { min-height: 100vh; min-height: 100dvh; padding: 0; }
 .app-frame.with-nav { padding-bottom: calc(var(--bottom-nav-height) + 16px); }
 #main { min-width: 0; }
@@ -54,9 +54,21 @@ p { margin: 0 0 16px; }
 p:last-child { margin-bottom: 0; }
 .muted, .helper { color: var(--muted); }
 .helper { margin: 8px 0 0; font-size: .8125rem; }
-.screen-page { padding: 24px max(22px, env(safe-area-inset-right)) max(28px, env(safe-area-inset-bottom)) max(22px, env(safe-area-inset-left)); }
+.screen-page { padding: calc(env(safe-area-inset-top) + 24px) max(22px, env(safe-area-inset-right)) max(28px, env(safe-area-inset-bottom)) max(22px, env(safe-area-inset-left)); }
 .panel { background: var(--white); border: 1px solid var(--line); border-radius: 20px; padding: 24px; }
-.app-frame #main > .panel { margin: 24px 20px; }
+.app-frame #main > .panel { margin: calc(env(safe-area-inset-top) + 24px) 20px; }
+/* Only the first visible block consumes the top safe area. */
+#school-brand:not([hidden]) ~ #account-bar { padding-top: 16px; }
+#school-brand:not([hidden]) ~ #main > .panel,
+#account-bar:not([hidden]) ~ #main > .panel { margin-top: 24px; }
+#school-brand:not([hidden]) ~ #main > .screen-page:not(.redeem-screen),
+#account-bar:not([hidden]) ~ #main > .screen-page:not(.redeem-screen) { padding-top: 24px; }
+/* In-flow success feedback can become the first visible content too. */
+#school-brand[hidden] ~ #account-bar[hidden] ~ #success-message:not([hidden]):not(.resume-toast) { margin-top: calc(env(safe-area-inset-top) + 16px); }
+#success-message:not([hidden]):not(.resume-toast) ~ #main > .panel { margin-top: 24px; }
+#success-message:not([hidden]):not(.resume-toast) ~ #main > .screen-page:not(.redeem-screen):not(.child-screen),
+#success-message:not([hidden]):not(.resume-toast) ~ #main .home-header { padding-top: 24px; }
+#success-message:not([hidden]):not(.resume-toast) ~ #main > .child-screen { padding-top: 20px; }
 .eyebrow { color: var(--teal); font-size: .875rem; font-weight: 600; margin-bottom: 8px; }
 .button { display: inline-flex; align-items: center; justify-content: center; gap: 10px; min-height: 48px; min-width: 48px; padding: 12px 16px; border: 1px solid transparent; border-radius: 14px; font: inherit; font-weight: 600; line-height: 1.5; text-decoration: none; text-align: center; cursor: pointer; touch-action: manipulation; overflow-wrap: anywhere; transition: background-color 150ms, opacity 150ms; }
 .button.primary { background: var(--teal); color: var(--white); }
@@ -69,18 +81,22 @@ p:last-child { margin-bottom: 0; }
 .button:hover:not(:disabled), .filter-chip:hover, .bottom-nav a:hover { filter: brightness(.96); }
 .button:active:not(:disabled), .filter-chip:active, .bottom-nav a:active { opacity: .78; }
 .button:disabled { opacity: .55; cursor: not-allowed; }
+.busy-icon { display: inline-flex; vertical-align: middle; margin-inline-end: 6px; }
+.busy-icon svg { width: 1.1em; height: 1.1em; animation: hourglass-flip 1.6s ease-in-out infinite; }
+.button .busy-icon { margin: 0; }
+@keyframes hourglass-flip { 0%, 40% { transform: rotate(0); } 50%, 90% { transform: rotate(180deg); } 100% { transform: rotate(180deg); } }
 svg { width: 24px; height: 24px; flex-shrink: 0; vertical-align: middle; }
 a { color: var(--teal); text-underline-offset: 4px; }
 a:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 3px solid var(--teal); outline-offset: 4px; }
 .bell-button:focus-visible { outline-color: var(--white); }
 [tabindex="-1"]:focus, [tabindex="-1"]:focus-visible { outline: none; }
 .skip-link { position: absolute; top: -120px; left: 16px; padding: 12px; background: var(--white); z-index: 30; }
-.skip-link:focus { top: max(8px, env(safe-area-inset-top)); }
+.skip-link:focus { top: calc(env(safe-area-inset-top) + 8px); }
 .school-brand { display: flex; align-items: center; gap: 16px; margin-bottom: 32px; }
 .school-brand img { flex: 0 0 64px; object-fit: contain; }
 .school-name { margin: 0; font-size: 1.125rem; font-weight: 600; }
 .brand-caption { margin: 2px 0 0; color: var(--muted); font-size: .875rem; }
-.fallback-brand { padding: max(24px, env(safe-area-inset-top)) 20px 0; }
+.fallback-brand { padding: calc(env(safe-area-inset-top) + 24px) 20px 0; }
 .notice { border-radius: 12px; padding: 12px 16px; margin: 16px; overflow-wrap: anywhere; }
 .notice.error { color: var(--danger); background: var(--danger-soft); }
 .notice.success { color: var(--teal); background: var(--teal-soft); }
@@ -94,7 +110,7 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 .actions { display: grid; gap: 12px; }
 /* เข้าสู่ระบบ: หัวเขียวและแผ่นขาวซ้อนตามแบบ A */
 .login-screen { min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; }
-.login-hero { flex: 1; min-height: 340px; background: radial-gradient(120% 90% at 20% 0%, var(--teal-glow) 0%, var(--teal) 45%, var(--teal-deep) 100%); color: var(--white); display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: max(36px, env(safe-area-inset-top)) 24px 60px; position: relative; overflow: hidden; }
+.login-hero { flex: 1; min-height: 340px; background: radial-gradient(120% 90% at 20% 0%, var(--teal-glow) 0%, var(--teal) 45%, var(--teal-deep) 100%); color: var(--white); display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: calc(env(safe-area-inset-top) + 36px) 24px 60px; position: relative; overflow: hidden; }
 .login-hero::after { content: ''; position: absolute; right: -40px; bottom: -60px; width: 220px; height: 220px; border-radius: 50%; background: var(--hero-decoration); pointer-events: none; }
 .crest { width: 96px; height: 96px; flex-shrink: 0; border-radius: 50%; background: var(--white); display: grid; place-items: center; box-shadow: var(--crest-shadow); margin-bottom: 14px; }
 .crest img { width: 80px; height: 80px; border-radius: 50%; }
@@ -115,7 +131,7 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 .login-developer { margin: 12px 0 0; text-align: center; font-size: .75rem; color: var(--muted); }
 .login-developer a { display: inline-flex; align-items: center; min-height: 44px; color: inherit; }
 /* เชื่อมบัญชี: ช่องกรอกรหัสจริงในบัตรเส้นประ */
-.account-bar { display: flex; align-items: center; gap: 12px; padding: max(16px, env(safe-area-inset-top)) 18px 16px; background: var(--white); border-bottom: 1px solid var(--line); }
+.account-bar { display: flex; align-items: center; gap: 12px; padding: calc(env(safe-area-inset-top) + 16px) 18px 16px; background: var(--white); border-bottom: 1px solid var(--line); }
 .account-info { min-width: 0; flex: 1; }
 .account-info small { display: block; color: var(--muted); }
 .account-info strong { font-size: .9375rem; }
@@ -134,7 +150,7 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 #invite-code[aria-invalid="true"] { border-color: var(--danger); }
 .invite-tip { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; margin-bottom: 18px; border-radius: 14px; background: var(--amber-soft); color: var(--amber); font-size: .875rem; }
 /* หน้าแรก C: ชิปกรองเป็นแถวเดียวที่เลื่อนแนวนอนได้ */
-.home-header { background: linear-gradient(160deg, var(--teal), var(--teal-deep)); color: var(--white); padding: max(24px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) 78px max(20px, env(safe-area-inset-left)); border-radius: 0 0 28px 28px; }
+.home-header { background: linear-gradient(160deg, var(--teal), var(--teal-deep)); color: var(--white); padding: calc(env(safe-area-inset-top) + 24px) max(20px, env(safe-area-inset-right)) 78px max(20px, env(safe-area-inset-left)); border-radius: 0 0 28px 28px; }
 .home-greeting { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .home-greeting > div { min-width: 0; }
 .today-date { margin: 0 0 4px; font-size: .8125rem; }
@@ -184,7 +200,7 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 .data-card, .calendar-card { background: var(--white); padding: 18px; border-radius: 20px; margin-top: 16px; box-shadow: var(--shadow); }
 .data-card h2 { font-size: 1.125rem; }
 .detail-back { margin-bottom: 18px; }
-.child-screen { padding-top: max(20px, env(safe-area-inset-top)); }
+.child-screen { padding-top: calc(env(safe-area-inset-top) + 20px); }
 .month-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 16px 0; }
 .month-controls h3 { min-width: 0; text-align: center; margin: 0; }
 .month-controls .button { flex-shrink: 0; padding: 10px; }
@@ -245,7 +261,7 @@ summary { cursor: pointer; min-height: 44px; padding-block: 10px; color: var(--t
 .empty-page { padding: 40px 16px; margin-top: 24px; border-radius: 22px; background: var(--white); box-shadow: var(--shadow); text-align: center; }
 .empty-page h2 { font-size: 1.125rem; }
 .empty-page p { color: var(--muted); font-size: .875rem; }
-.account-screen { padding-top: max(24px, env(safe-area-inset-top)); }
+.account-screen { padding-top: calc(env(safe-area-inset-top) + 24px); }
 .account-card { display: flex; align-items: center; gap: 14px; padding: 18px; margin-top: 24px; border-radius: 22px; background: var(--white); box-shadow: var(--shadow); }
 .account-card > div { min-width: 0; }
 .account-card h2 { font-size: .875rem; margin-bottom: 4px; }
@@ -275,7 +291,7 @@ footer a { display: inline-flex; align-items: center; min-height: 48px; padding:
   .install-heading { gap: 8px; }
 }
 @media (max-height: 640px) {
-  .login-hero { min-height: 260px; padding-top: max(24px, env(safe-area-inset-top)); padding-bottom: 52px; }
+  .login-hero { min-height: 260px; padding-top: calc(env(safe-area-inset-top) + 24px); padding-bottom: 52px; }
   .crest { width: 80px; height: 80px; margin-bottom: 10px; }
   .crest img { width: 68px; height: 68px; }
 }
