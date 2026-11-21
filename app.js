@@ -4,7 +4,7 @@ export const CLIENT_OPTIONS = { auth: {
   storageKey: 'crs-parent-auth', flowType: 'pkce', detectSessionInUrl: true, persistSession: true,
 } };
 export const INSTALL_DISMISSED_KEY = 'crs-parent-install-dismissed';
-export const MONEY_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/money.js?v=20261121-1';
+export const MONEY_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/money.js?v=20261121-2';
 export const GRADES_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/grades.js?v=20261121-1';
 export const REPORT_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/report-card.js?v=20261121-2';
 
@@ -283,6 +283,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
         profile: { ...resource(), started: false, refreshing: false },
         timetable: { loading: true, pending: false, date: '', error: '', result: undefined },
         transport: { loading: true, pending: false, error: '', result: undefined },
+        feeNotices: { loading: true, pending: false, error: '', result: undefined },
         attendanceView: { secondary: isSecondary(child), selected: '', entries: new Map() },
         grades: hasAcademicReports(child) ? { primary: isPrimary(child), started: false, terms: resource(),
           selected: '', entries: new Map() } : null,
@@ -362,6 +363,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       if (quiet && page === 'child') {
         if (timetable) jobs.push(loadTimetable(child.student_id, { quiet: true }));
         if (!section || section === 'transport') jobs.push(loadTransport(child.student_id, { quiet: true }));
+        if (finance) jobs.push(loadFeeNotices(child.student_id, { quiet: true }));
         const refreshGrades = target.grades?.started && (!section || section === 'grades');
         if (refreshGrades) {
           jobs.push(loadGradeTerms(child.student_id, { force: true }));
@@ -489,6 +491,40 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
     } finally {
       if (version === ownVersion) {
         state.loadedAt[`child/${studentId}/transport`] = now().getTime();
+        target.loading = false; target.pending = false; changed();
+      }
+    }
+  }
+  async function loadFeeNotices(studentId, { force = false, quiet = false } = {}) {
+    const target = state.children[studentId]?.feeNotices;
+    if (!target || target.pending || (!target.loading && !quiet && !force)) return;
+    const ownVersion = version;
+    target.pending = true;
+    let received = false;
+    if (!quiet) { target.loading = true; target.error = ''; changed(); }
+    try {
+      const { data, error } = await sb.rpc('child_fee_notices', { p_student_id: studentId });
+      if (version !== ownVersion) return;
+      if (error) throw error;
+      if (data !== null && !Array.isArray(data?.notices)) throw Error('Invalid fee notices');
+      received = true;
+      const notices = data?.notices ?? [];
+      if (notices.length) {
+        const module = await sharedMoney();
+        if (version !== ownVersion) return;
+        target.result = sortAcademicTerms(notices.map(notice => invoiceSummary(data, notice, module)));
+      } else {
+        target.result = [];
+      }
+      target.error = '';
+    } catch {
+      if (version === ownVersion) {
+        // ผลอ่านล่าสุดอาจถอนประกาศเดิมแล้ว ล้างยอดเก่าถ้าคำนวณใบแจ้งชุดใหม่ไม่ได้
+        if (received) target.result = undefined;
+        if (!quiet || target.result === undefined) target.error = feeNoticeError;
+      }
+    } finally {
+      if (version === ownVersion) {
         target.loading = false; target.pending = false; changed();
       }
     }
@@ -766,7 +802,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       }
     }
   }
-  return { state, load, reset, loadLeaves, loadProfile, loadTimetable, loadTransport, loadSubjectAttendance, loadGrades: loadGradeTerms,
+  return { state, load, reset, loadLeaves, loadProfile, loadTimetable, loadTransport, loadFeeNotices, loadSubjectAttendance, loadGrades: loadGradeTerms,
     loadGradeSummary, selectGradeTerm, loadDevelopment };
 }
 
@@ -1454,6 +1490,72 @@ export function transportMarkup(entry) {
     <p class="helper transport-note">ยอดอาจเปลี่ยนเมื่อครูเช็คชื่อย้อนหลังหรือฝ่ายการเงินแก้ไข · สอบถามฝ่ายการเงิน</p>`;
 }
 
+const feeNoticeTitle = 'ใบแจ้งค่าธรรมเนียม';
+const feeNoticeError = 'โหลดใบแจ้งค่าธรรมเนียมไม่สำเร็จ ตรวจอินเทอร์เน็ตแล้วลองใหม่';
+const feeNoticeMismatch = 'ยอดรวมคงเหลือไม่ตรงกับยอดค้างชำระ กรุณาสอบถามฝ่ายการเงินของโรงเรียน';
+const invoiceAmount = value => value.toLocaleString('th-TH', { maximumFractionDigits: 2 }).replace(/^-/, '−');
+
+function invoiceSummary({ year, grade_level: grade }, { term, published_at: publishedAt, charges, payments }, module) {
+  const { buildInvoiceRows, computeFeeOutstanding, MANUAL_NOTE_PLACEHOLDER } = module;
+  if (!Array.isArray(charges) || !Array.isArray(payments) || typeof MANUAL_NOTE_PLACEHOLDER !== 'string') {
+    throw Error('Incomplete fee notice data or formulas');
+  }
+  const table = buildInvoiceRows(charges, payments);
+  const { outstanding } = computeFeeOutstanding(charges, payments);
+  const header = { year, term, grade, publishedAt };
+  if (![outstanding, table.full, table.paid, table.remaining].every(Number.isFinite) ||
+      Math.abs(table.remaining - outstanding) > 0.005) return { ...header, error: feeNoticeMismatch };
+  const rows = table.rows.map(({ note, ...row }) => ({ ...row, note: note === MANUAL_NOTE_PLACEHOLDER ? '' : note }));
+  return { ...header, ...table, rows, outstanding };
+}
+
+function invoiceMarkup({ year, term, grade, publishedAt, error, outstanding, rows, full, paid }) {
+  const scope = [`ภาคเรียนที่ ${term}/${year}`, grade].filter(Boolean).join(' · ');
+  const date = typeof publishedAt === 'string' && Number.isFinite(Date.parse(publishedAt))
+    ? `<p class="helper">ประกาศเมื่อ <time datetime="${escapeHtml(publishedAt)}">${escapeHtml(thaiDate(publishedAt))}</time></p>` : '';
+  const header = `<h2>${feeNoticeTitle}</h2><h3>${escapeHtml(scope)}</h3>${date}`;
+  if (error) return `<section class="data-card fee-notice">${header}<p class="field-error" role="alert">${escapeHtml(error)}</p></section>`;
+  const due = outstanding > 0;
+  const lines = rows.map(({ description, qty, unit, note, kind, full, paid, remaining }) => {
+    const credit = full < 0;
+    return `<li class="fee-notice-line${credit ? ' fee-notice-credit' : ''}">
+      <div class="fee-notice-line-top"><strong>${escapeHtml(description || 'รายการค่าใช้จ่าย')}</strong>
+      <strong aria-label="คงเหลือ ${invoiceAmount(remaining)} บาท">${invoiceAmount(remaining)}</strong></div>
+      ${credit ? `<p class="fee-notice-kind">${escapeHtml(kind || 'ส่วนลด')}</p>` : ''}
+      ${qty > 1 ? `<p class="helper">${invoiceAmount(qty)} × ${invoiceAmount(unit)} บาท</p>` : ''}
+      ${note ? `<p class="helper">${escapeHtml(note)}</p>` : ''}
+      <p class="helper">เต็ม ${invoiceAmount(full)} · จ่ายแล้ว ${invoiceAmount(paid)}</p></li>`;
+  }).join('');
+  return `<section class="data-card fee-notice">${header}
+    <div class="fee-notice-balance${due ? ' is-due' : ''}">
+      <span>ยอดคงเหลือ</span><strong>${invoiceAmount(outstanding)} บาท</strong>
+      <span class="fee-notice-state">${icon(due ? 'alert' : 'check')}${due ? 'ค้างชำระ' : 'ชำระครบแล้ว'}</span>
+    </div>
+    ${lines ? `<ul class="fee-notice-lines">${lines}</ul>` : '<p class="muted">ยังไม่มีรายการค่าใช้จ่ายในภาคเรียนนี้</p>'}
+    <dl class="fee-notice-totals">
+      <div><dt>ยอดเต็ม</dt><dd>${invoiceAmount(full)} บาท</dd></div>
+      <div><dt>จ่ายแล้ว</dt><dd>${invoiceAmount(paid)} บาท</dd></div>
+      <div><dt>คงเหลือ</dt><dd>${invoiceAmount(outstanding)} บาท</dd></div>
+    </dl>
+    <p class="helper">ยอดเป็นปัจจุบัน · ชำระที่ฝ่ายการเงินของโรงเรียน</p>
+  </section>`;
+}
+
+export function feeNoticesMarkup(entry) {
+  if (entry?.result?.length && !entry.loading && !entry.error) return entry.result.map(invoiceMarkup).join('');
+  const loading = !entry || entry.loading;
+  const content = loading ? `<p class="muted" role="status">${busyIcon()}กำลังโหลดใบแจ้งค่าธรรมเนียม…</p>`
+    : entry.error ? `<p class="field-error" role="alert">${escapeHtml(entry.error)}</p><button id="retry-fee-notices" class="button quiet" type="button">ลองใหม่</button>`
+      : '<p class="muted">ยังไม่มีใบแจ้งค่าธรรมเนียมที่โรงเรียนประกาศ</p>';
+  return `<section class="data-card fee-notice"><h2>${feeNoticeTitle}</h2>${content}</section>`;
+}
+
+function feeNoticesTileWarning(entry) {
+  if (!entry?.result?.length || entry.error || entry.result.some(notice => notice.error)) return '';
+  const due = entry.result.reduce((sum, notice) => sum + Math.max(0, notice.outstanding), 0);
+  return due > 0 ? `<span class="tile-detail tile-warning fee-notice-warning">${icon('alert')}<span>ค้างค่าธรรมเนียม ${invoiceAmount(due)} บาท</span></span>` : '';
+}
+
 function attendanceTileNote(entry) {
   const subjects = entry?.result?.subjects || [];
   const danger = subjects.filter(subject => subject.level === 'retake' || subject.level === 'critical').length;
@@ -1517,6 +1619,7 @@ export function childTilesMarkup(child, data, read, now = new Date()) {
     detail: balance === null ? 'ยังแสดงยอดไม่ได้' : data.payments.loading ? 'กำลังโหลดประวัติการชำระ…'
       : data.payments.error ? 'ยังแสดงประวัติการชำระไม่ได้' : validSchoolDate(paid)
         ? `ชำระล่าสุด ${thaiDate(paid, { year: undefined })}` : 'ยังไม่มีประวัติการชำระ',
+    extra: feeNoticesTileWarning(data?.feeNotices),
   }) + childTile(profileLabel(hasHealth), hasHealth ? 'heart' : 'user', {
     href: link + '/profile', busy: !data || data.profile.loading, warning: warnings.length > 0,
     detail: data?.profile.error ? 'ยังแสดงข้อมูลไม่ได้' : warnings.length === 1 && warnings[0][0] === 'drug_allergy' ? 'แพ้ยา 1 รายการ'
@@ -1753,7 +1856,8 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
     if (location.id !== id || location.section !== section || !ownsChild(id)) return;
     if (!section) return Promise.all([reads.loadProfile(id), reads.loadGradeSummary(id),
       reads.loadSubjectAttendance(id, { summary: true }), reads.loadDevelopment(id, { summary: true }), reads.loadTimetable(id),
-      reads.loadTransport(id)]);
+      reads.loadTransport(id), reads.loadFeeNotices(id)]);
+    if (section === 'money') return reads.loadFeeNotices(id);
     if (section === 'timetable') return reads.loadTimetable(id);
     if (section === 'transport') return reads.loadTransport(id);
     if (section === 'attendance') return reads.loadSubjectAttendance(id);
@@ -1776,6 +1880,7 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
     retryProfile(id) { if (ownsChild(id)) return reads.loadProfile(id, { force: true }); },
     retryTimetable(id) { if (ownsChild(id)) return reads.loadTimetable(id, { force: true }); },
     retryTransport(id) { if (ownsChild(id)) return reads.loadTransport(id, { force: true }); },
+    retryFeeNotices(id) { if (ownsChild(id)) return reads.loadFeeNotices(id, { force: true }); },
     selectAttendanceTerm(id, key) { if (ownsChild(id)) return reads.loadSubjectAttendance(id, { key }); },
     retrySubjectAttendance(id) { if (ownsChild(id)) return reads.loadSubjectAttendance(id, { force: true }); },
     loadGrades(id, options) { if (ownsChild(id)) return reads.loadGrades(id, options); },
@@ -2148,19 +2253,20 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         } else if (section === 'transport') {
           content = transportMarkup(data?.transport);
         } else if (section === 'money') {
-          content = `<section class="data-card" aria-busy="${!data || data.savings.loading || s.read.moneyLoading}"><h2>เงินออม</h2>${savingsMarkup(data?.savings, s.read.money, expandedSavings, s.read.moneyLoading)}</section>
+          content = feeNoticesMarkup(data?.feeNotices) + `<section class="data-card" aria-busy="${!data || data.savings.loading || s.read.moneyLoading}"><h2>เงินออม</h2>${savingsMarkup(data?.savings, s.read.money, expandedSavings, s.read.moneyLoading)}</section>
             <section class="data-card" aria-busy="${!data || data.payments.loading}"><h2>ประวัติการชำระ</h2>${paymentsMarkup(data?.payments)}</section>`;
         } else {
           content = profileMarkup(data?.profile);
         }
         main.innerHTML = `<section class="child-section">${childSectionMarkup(child, sectionTitle, data, subtitle)}<div class="child-section-content">${content}</div></section>`;
       }
-      if (data && ['', 'profile', 'grades', 'attendance', 'development', 'timetable', 'transport'].includes(section)) {
+      if (data && ['', 'profile', 'grades', 'attendance', 'development', 'timetable', 'transport', 'money'].includes(section)) {
         void Promise.resolve().then(() => controller.loadChildPage(id, section));
       }
       main.querySelector('#retry-profile')?.addEventListener('click', () => { void controller.retryProfile(id); });
       main.querySelector('#retry-timetable')?.addEventListener('click', () => { void controller.retryTimetable(id); });
       main.querySelector('#retry-transport')?.addEventListener('click', () => { void controller.retryTransport(id); });
+      main.querySelector('#retry-fee-notices')?.addEventListener('click', () => { void controller.retryFeeNotices(id); });
       main.querySelectorAll('[data-timetable-day]').forEach(button => button.addEventListener('click', () => {
         timetableDay = Number(button.dataset.timetableDay); controller.notify();
       }));
@@ -2264,7 +2370,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         main.querySelector('#subject-attendance-heading')?.focus({ preventScroll: true });
       } else if (activeId === 'retry-development') {
         (main.querySelector('[data-development-term][aria-pressed="true"]') || main.querySelector('h1'))?.focus({ preventScroll: true });
-      } else if (activeId === 'retry-timetable' || activeId === 'retry-transport') {
+      } else if (activeId === 'retry-timetable' || activeId === 'retry-transport' || activeId === 'retry-fee-notices') {
         main.querySelector('h1')?.focus({ preventScroll: true });
       }
     }

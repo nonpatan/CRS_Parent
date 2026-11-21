@@ -246,6 +246,33 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 .transport-line { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 12px; overflow-wrap: anywhere; }
 .transport-line > * { min-width: 0; }
 .transport-note { margin-top: 12px; }
+
+.fee-notice, .fee-notice-warning { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.fee-notice-warning svg { flex: none; }
+.fee-notice :is(h2, h3, p, dl, dd) { margin: 0; }
+.fee-notice h3 { margin-top: 4px; font-size: 1rem; }
+.fee-notice > :is(.muted, .field-error, .helper:last-child) { margin-top: 8px; }
+.fee-notice-balance {
+  display: grid; justify-items: start; gap: 4px; margin-block: 14px; padding: 12px;
+  border-radius: 12px; color: var(--teal); background: var(--teal-soft);
+}
+.fee-notice-balance.is-due { color: var(--amber); background: var(--amber-soft); }
+.fee-notice-balance strong { font-size: 1.625rem; line-height: 1.25; }
+.fee-notice-state { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.fee-notice-state svg { flex: none; width: 1rem; height: 1rem; }
+.fee-notice-lines { list-style: none; margin: 0; padding: 0; }
+.fee-notice-line { padding-block: 10px; border-top: 1px solid var(--line); }
+.fee-notice-line-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; }
+.fee-notice-line-top strong:last-child { max-inline-size: 12ch; text-align: end; }
+.fee-notice-line p { margin-top: 3px; }
+.fee-notice-credit .fee-notice-line-top strong:last-child, .fee-notice-kind { color: var(--teal); }
+.fee-notice-kind { font-size: .875rem; font-weight: 600; }
+.fee-notice-totals {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 7rem), 1fr));
+  gap: 8px 12px; padding-block: 10px; border-block: 1px solid var(--line);
+}
+.fee-notice-totals dt { color: var(--muted); font-size: .875rem; }
+.fee-notice-totals dd { font-weight: 700; }
 .development-comment { color: var(--ink); background: var(--blue-soft); }
 .development-byline { color: var(--blue); font-size: .875rem; }
 .development-message { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
