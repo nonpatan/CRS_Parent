@@ -215,6 +215,8 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 .development-result.positive { color: var(--teal); background: var(--teal-soft); }
 .development-result.danger { color: var(--danger); background: var(--danger-soft); }
 .development-result.neutral { color: var(--muted); background: var(--bg); }
+.development-value { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-inline-size: 0; }
+.development-score { color: var(--muted); font-size: .8125rem; font-variant-numeric: tabular-nums; }
 .grade-average { margin-block: 20px; font-variant-numeric: tabular-nums; }
 .grade-average h2 { color: var(--muted); font-size: 1rem; }
 .grade-average > strong { font-size: 2rem; color: var(--teal); }

@@ -673,7 +673,20 @@ function reportExtras(data, primary, module) {
     traits: traits.slice().sort((a, b) => a.seq - b.seq).map(trait => ({
       name: trait.name, level: module.traitLevel(trait_results, trait.id, options),
     })),
+    competency: reportCompetency(data),
   };
+}
+function reportCompetency({ competencies, competency_results, competency_published_at: publishedAt }) {
+  if (!Array.isArray(competencies) || !Array.isArray(competency_results) ||
+      typeof publishedAt !== 'string' || !Number.isFinite(Date.parse(publishedAt))) return null;
+  const byId = new Map(competency_results.map(row => [row.competency_id, row]));
+  const rows = competencies.slice().sort((a, b) => a.seq - b.seq).map(({ id, name }) => {
+    const result = byId.get(id);
+    if (!result) return { name, label: '—' };
+    if (!result.complete) return { name, label: 'ยังสรุปไม่ได้', tone: 'neutral' };
+    return { name, label: result.level ?? '—', tone: 'positive', score: result.score };
+  });
+  return { rows, publishedAt };
 }
 function primaryPeriod(term) { return String(term) === '2' ? 'ปลายปี' : 'กลางปี'; }
 function releaseMessage(term, date, fallback) {
@@ -717,8 +730,13 @@ export function gradesMarkup(child, grades) {
 
 const traitLabels = ['ไม่ผ่าน', 'ผ่าน', 'ดี', 'ดีเยี่ยม'];
 function developmentRows(rows) {
-  return `<ul class="development-rows">${rows.map(({ name, label, tone, followUp }) =>
-    `<li><span class="development-name">${escapeHtml(name)}</span><strong class="development-result ${tone}">${escapeHtml(label)}</strong>${followUp ? '<p class="helper">ติดต่อครูประจำชั้น</p>' : ''}</li>`).join('')}</ul>`;
+  return `<ul class="development-rows">${rows.map(({ name, label, tone, followUp, score }) => {
+    const level = tone ? `<strong class="development-result ${tone}">${escapeHtml(label)}</strong>`
+      : `<span class="muted">${escapeHtml(label)}</span>`;
+    const value = Number.isFinite(score)
+      ? `<span class="development-value">${level}<span class="development-score">${score.toFixed(1)}</span></span>` : level;
+    return `<li><span class="development-name">${escapeHtml(name)}</span>${value}${followUp ? '<p class="helper">ติดต่อครูประจำชั้น</p>' : ''}</li>`;
+  }).join('')}</ul>`;
 }
 export function developmentMarkup(view) {
   const loading = `<p class="data-status" role="status">${busyIcon()}กำลังโหลดผล…</p>`;
@@ -737,16 +755,20 @@ export function developmentMarkup(view) {
   if (entry.error) return chips + retry;
   const { result } = entry;
   if (!result.released) return chips + `<p class="data-status" role="status">${releaseMessage(term, result.release_date, 'ยังไม่มีการประกาศผล')}</p>`;
-  const { comment, activities, traits } = result;
+  const { comment, activities, traits, competency } = result;
   const activityContent = activities.length ? developmentRows(activities.map(({ name, result }) => ({ name, label: result,
     tone: result === 'ผ่าน' ? 'positive' : result === 'ไม่ผ่าน' ? 'danger' : 'neutral', followUp: result === 'ไม่ผ่าน',
   }))) : '<p class="data-status">ยังไม่มีกิจกรรมในภาคนี้</p>';
   const traitContent = traits.some(trait => trait.level !== null) ? developmentRows(traits.map(({ name, level }) => ({ name,
     label: traitLabels[level] ?? 'ยังไม่ประเมิน', tone: level === null ? 'neutral' : level === 0 ? 'danger' : 'positive',
   }))) : '<p class="data-status">ครูยังไม่ได้ประเมิน</p>';
+  const competencyContent = competency
+    ? `${developmentRows(competency.rows)}<p class="helper">บันทึกผลเมื่อ <time datetime="${escapeHtml(competency.publishedAt)}">${escapeHtml(thaiDate(competency.publishedAt))}</time></p>`
+    : '<p class="data-status">ครูยังไม่ได้บันทึกผลสมรรถนะของภาคนี้</p>';
   return chips + (comment ? `<section class="data-card development-comment"><h2>ความเห็นครูประจำชั้น</h2>
     <p class="development-byline">ครูประจำชั้น · ภาคเรียนที่ ${escapeHtml(term.term)}/${escapeHtml(term.year)}</p><p class="development-message">${escapeHtml(comment)}</p></section>` : '') +
     `<section class="data-card"><h2>กิจกรรมพัฒนาผู้เรียน</h2>${activityContent}</section>
+    <section class="data-card"><h2>สมรรถนะสำคัญ</h2>${competencyContent}</section>
     <section class="data-card"><h2>คุณลักษณะอันพึงประสงค์</h2>${traitContent}</section>`;
 }
 
