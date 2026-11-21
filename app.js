@@ -20,14 +20,31 @@ export function formatInvite(value) {
   return code.length > 4 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
 }
 
+const childSections = {
+  attendance: 'การมาเรียน',
+  grades: 'ผลการเรียน',
+  money: 'เงินออม · การชำระ',
+  profile: 'ข้อมูลประจำตัว · สุขภาพ',
+};
+
+function childLocation(hash) {
+  const [, encoded, section = ''] = hash.split('/');
+  let id = '';
+  try { id = decodeURIComponent(encoded || ''); } catch { /* Invalid child link. */ }
+  return { id, section };
+}
+function childHref(id) { return `#child/${encodeURIComponent(id)}`; }
+
 export function routeFor({ session, loaded, loading, loadError, children }, hash) {
   if (!session) return 'login';
   if (loading || (!loaded && !loadError)) return 'loading';
   if (loadError) return 'error';
   if (!children.length) return 'redeem';
   if (/^#child\/[^/]+$/.test(hash)) return 'child';
+  if (/^#child\/[^/]+\/(attendance|grades|money|profile)$/.test(hash)) return 'childSection';
+  if (hash.startsWith('#child/')) return 'childMissing';
   if (/^#leave\/[^/]+$/.test(hash)) return 'leave';
-  return ['#redeem', '#calendar', '#notifications', '#account'].includes(hash) ? hash.slice(1) : 'home';
+  return ['#redeem', '#calendar', '#account'].includes(hash) ? hash.slice(1) : 'home';
 }
 
 export function authErrorMessage(error) {
@@ -200,7 +217,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
     state.schoolDays = null;
     state.loading = false; state.loadedAt = {};
   }
-  async function load(children, { quiet = false, page = 'all', studentId = '' } = {}) {
+  async function load(children, { quiet = false, page = 'all', studentId = '', section = '' } = {}) {
     const knownYearStart = state.schoolDays?.year_start;
     if (!quiet) reset();
     const ownVersion = version;
@@ -209,6 +226,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
     if (!quiet) {
       state.moneyLoading = true;
       for (const child of children) state.children[child.student_id] = { attendance: resource(), savings: resource(), payments: resource(), leaves: resource(),
+        profile: { ...resource(), started: false, refreshing: false },
         grades: { secondary: isSecondary(child), started: false, terms: resource(), selected: '', entries: new Map() } };
       changed();
     }
@@ -237,14 +255,16 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
         if (version === ownVersion && revisions.get(target) === revision) { target.loading = false; changed(); }
       }
     }
-    const money = !quiet || (!state.money && page !== 'calendar') ? (async () => {
+    const attendance = page !== 'calendar' && (!section || section === 'attendance');
+    const finance = page !== 'calendar' && (!section || section === 'money');
+    const money = finance && (!quiet || !state.money) ? (async () => {
       try {
         const module = await loadMoney();
         if (version === ownVersion && typeof module.computeSavingsBalance === 'function') state.money = module.computeSavingsBalance;
       } catch { /* Keep raw transactions visible; never substitute a local formula. */ }
       finally { if (version === ownVersion) { state.moneyLoading = false; changed(); } }
     })() : Promise.resolve();
-    const schoolDays = page !== 'calendar' ? (async () => {
+    const schoolDays = attendance ? (async () => {
       const to = shiftDate(state.today, 120);
       // A known start is useful on refresh, provided the RPC's 400-day cap allows it.
       const from = knownYearStart && knownYearStart >= shiftDate(to, -400) && knownYearStart <= to
@@ -266,24 +286,57 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
     for (const child of children) {
       if (page === 'calendar' || (page === 'child' && String(child.student_id) !== studentId)) continue;
       const target = state.children[child.student_id], args = { p_student_id: child.student_id };
-      jobs.push(schoolDays.then(metadata => {
+      if (attendance) jobs.push(schoolDays.then(metadata => {
         if (version !== ownVersion) return;
         return fetchRows(target.attendance, 'child_attendance', { ...args,
           p_from: metadata?.year_start || shiftDate(state.today, -400), p_to: state.today },
         rows => schoolYearAttendance(rows, metadata));
-      }),
-        fetchRows(target.leaves, 'my_leave_requests', args), fetchRows(target.savings, 'child_savings', args));
-      if (page === 'all' || page === 'child') jobs.push(fetchRows(target.payments, 'child_payments', { ...args, p_limit: 50 }));
-      if (quiet && page === 'child' && target.grades.secondary) jobs.push(loadGradeTerms(child.student_id, { force: true }));
+      }), fetchRows(target.leaves, 'my_leave_requests', args));
+      if (finance) jobs.push(fetchRows(target.savings, 'child_savings', args));
+      if (finance && page !== 'home') jobs.push(fetchRows(target.payments, 'child_payments', { ...args, p_limit: 50 }));
+      if (quiet && page === 'child') {
+        if (target.grades.started && (!section || section === 'grades')) {
+          jobs.push(loadGradeTerms(child.student_id, { force: true }));
+        }
+        if (!section || section === 'profile') jobs.push(loadProfile(child.student_id, { quiet: true }));
+      }
     }
     await Promise.allSettled(jobs);
     if (version !== ownVersion) return;
-    const scopes = page === 'all' ? ['home', 'calendar', ...children.map(child => `child/${child.student_id}`)]
-      : [page === 'child' ? `child/${studentId}` : page];
+    const scopes = page === 'all' ? ['home', 'calendar', ...children.flatMap(({ student_id: id }) =>
+      [`child/${id}`, `child/${id}/attendance`, `child/${id}/money`])]
+      : [page === 'child' ? `child/${studentId}${section ? `/${section}` : ''}` : page];
     for (const scope of scopes) state.loadedAt[scope] = now().getTime();
     state.loading = false;
     if (notices.length) leavesChanged(notices);
     changed();
+  }
+  async function loadProfile(studentId, { force = false, quiet = false } = {}) {
+    const profile = state.children[studentId]?.profile;
+    if (!profile || (quiet && (!profile.started || profile.loading || profile.refreshing)) ||
+        (!quiet && profile.started && (profile.loading || !force))) return;
+    const ownVersion = version, revision = (revisions.get(profile) || 0) + 1;
+    revisions.set(profile, revision);
+    const current = () => version === ownVersion && revisions.get(profile) === revision;
+    profile.started = true;
+    profile.refreshing = quiet;
+    if (!quiet) { profile.loading = true; profile.error = ''; changed(); }
+    try {
+      const { data, error } = await sb.rpc('child_profile', { p_student_id: studentId });
+      if (!current()) return;
+      if (error || !Array.isArray(data) || data.length > 1 ||
+          (data.length === 1 && (!data[0] || typeof data[0] !== 'object' || Array.isArray(data[0])))) throw Error('Invalid profile');
+      profile.rows = data;
+      profile.error = data.length ? '' : 'ไม่พบข้อมูลประจำตัวของนักเรียนคนนี้ ลองใหม่อีกครั้ง';
+    } catch {
+      if (current() && !quiet) profile.error = 'โหลดข้อมูลประจำตัวไม่สำเร็จ ตรวจอินเทอร์เน็ตแล้วลองใหม่';
+    } finally {
+      if (current()) {
+        profile.loading = false; profile.refreshing = false;
+        state.loadedAt[`child/${studentId}/profile`] = now().getTime();
+        changed();
+      }
+    }
   }
   async function loadLeaves(studentId) {
     const ownVersion = version, target = state.children[studentId]?.leaves;
@@ -306,8 +359,11 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
     if (!grades?.secondary || !term) return;
     grades.selected = key;
     // คงชิปและโฟกัสระหว่างรีเฟรช แล้วโหลดภาคล่าสุดที่ผู้ใช้เลือก
-    if (grades.terms.loading) { changed(); return; }
-    if (grades.entries.has(key)) { changed(); return; }
+    if (grades.terms.loading || grades.entries.has(key)) { changed(); return; }
+    return loadGradeEntry(studentId, grades, term);
+  }
+  async function loadGradeEntry(studentId, grades, term) {
+    const key = gradeTermKey(term);
     const entry = { loading: true, error: '', released: false, release_date: term.release_date };
     grades.entries.set(key, entry);
     const ownVersion = version;
@@ -344,7 +400,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       if (current()) { entry.loading = false; changed(); }
     }
   }
-  async function loadGradeTerms(studentId, { force = false } = {}) {
+  async function loadGradeTerms(studentId, { force = false, summary = false } = {}) {
     const grades = state.children[studentId]?.grades;
     if (!grades?.secondary || (grades.started && !force)) return;
     grades.started = true;
@@ -362,18 +418,32 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       grades.terms.rows = data.slice().sort((a, b) => Number(b.year) - Number(a.year) || Number(b.term) - Number(a.term));
       if (!data.some(row => gradeTermKey(row) === grades.selected)) grades.selected = grades.terms.rows[0] ? gradeTermKey(grades.terms.rows[0]) : '';
       grades.terms.loading = false;
-      if (grades.selected) await selectGradeTerm(studentId, grades.selected);
+      if (summary) await loadGradeSummary(studentId);
+      else if (grades.selected) await selectGradeTerm(studentId, grades.selected);
     } catch {
       if (current()) grades.terms.error = 'ยังแสดงผลการเรียนไม่ได้ ลองใหม่';
     } finally {
-      if (current()) { grades.terms.loading = false; changed(); }
+      if (current()) {
+        grades.terms.loading = false;
+        state.loadedAt[`child/${studentId}/grades`] = now().getTime();
+        changed();
+      }
     }
   }
-  return { state, load, reset, loadLeaves, loadGrades: loadGradeTerms, selectGradeTerm };
+  async function loadGradeSummary(studentId) {
+    const grades = state.children[studentId]?.grades;
+    if (!grades?.secondary) return;
+    if (!grades.started) return loadGradeTerms(studentId, { summary: true });
+    if (grades.terms.loading || grades.terms.error) return;
+    const term = latestReleasedTerm(grades);
+    if (term && !grades.entries.has(gradeTermKey(term))) return loadGradeEntry(studentId, grades, term);
+  }
+  return { state, load, reset, loadLeaves, loadProfile, loadGrades: loadGradeTerms, loadGradeSummary, selectGradeTerm };
 }
 
 function isSecondary(child) { return /^ม\./.test(child?.grade_level || ''); }
 function gradeTermKey(term) { return `${term.year}/${term.term}`; }
+function latestReleasedTerm(grades) { return grades?.terms.rows.find(term => term.released === true); }
 
 export function gradesMarkup(child, grades) {
   if (!isSecondary(child)) return `<p class="data-status">${String(child?.grade_level || '').startsWith('ป.')
@@ -393,12 +463,12 @@ export function gradesMarkup(child, grades) {
     ? `ประกาศผลภาคเรียนที่ ${escapeHtml(term.term)}/${escapeHtml(term.year)} วันที่ ${escapeHtml(thaiDate(entry.release_date))}`
     : 'ยังไม่มีการประกาศผลการเรียน'}</p>`;
   const gpa = entry.gpa;
-  return chips + `<div class="grade-average"><h3>เกรดเฉลี่ยภาคเรียน</h3>${gpa.pending
+  return chips + `<div class="grade-average"><h2>เกรดเฉลี่ยภาคเรียน</h2>${gpa.pending
     ? `<p>ยังสรุปเกรดเฉลี่ยไม่ได้</p><p class="helper">${escapeHtml(gpa.pendingReason)}</p>`
     : `<strong>${Number.isFinite(gpa.gpa) ? gpa.gpa.toFixed(2) : '—'}</strong>`}</div>
     ${entry.subjects.length ? `<ul class="grade-subjects" aria-label="ผลการเรียนรายวิชา">${entry.subjects.map(subject => {
       const blocked = ['ร.', 'มส.'].includes(subject.type);
-      return `<li><p class="grade-code">${escapeHtml(subject.code)}</p><h3>${escapeHtml(subject.name)}</h3>
+      return `<li><p class="grade-code">${escapeHtml(subject.code)}</p><h2>${escapeHtml(subject.name)}</h2>
         <p class="helper">หน่วยกิต ${escapeHtml(subject.credits ?? '—')}</p><div class="grade-values"><p>คะแนนรวม <strong>${Number.isFinite(subject.score) ? `${escapeHtml(subject.score.toFixed(2))} / 100` : '—'}</strong></p>
         <p>เกรด <strong class="${blocked || !subject.complete ? 'grade-warning' : ''}">${escapeHtml(blocked ? subject.type : !subject.complete ? 'ยังไม่ครบ' : subject.grade ?? '—')}</strong></p></div>
         ${blocked ? '<p class="helper">ติดต่อครูประจำวิชา</p>' : ''}</li>`;
@@ -456,7 +526,7 @@ export function feedMarkup(rows, children, today) {
   }).join('');
 }
 
-const attendanceStates = { มา: ['ม', 'present'], มาสาย: ['ส', 'late'], ขาด: ['ข', 'absent'], ลาป่วย: ['ป', 'leave'], ลากิจ: ['ก', 'leave'] };
+const attendanceStates = { มา: ['มา', 'present'], มาสาย: ['สาย', 'late'], ขาด: ['ขาด', 'absent'], ลาป่วย: ['ลา', 'leave'], ลากิจ: ['ลา', 'leave'] };
 export function monthShift(month, offset) {
   const date = new Date(`${month}-01T12:00:00Z`); date.setUTCMonth(date.getUTCMonth() + offset);
   return date.toISOString().slice(0, 7);
@@ -493,7 +563,10 @@ export function attendanceMarkup(rows, month, today, schoolDays = null) {
       const [abbr, tone] = attendanceStates[day.status] || (future ? ['', 'future'] : day.holiday ? ['หยุด', 'holiday'] : ['—', 'unrecorded']);
       const label = day.status || (future ? 'ยังไม่ถึงวัน' : day.holiday ? holidayName : 'ไม่มีรายการเช็คชื่อ');
       return day.inMonth ? `<div role="listitem" class="attendance-day ${tone}"${day.holiday ? ` title="${escapeHtml(holidayName)}"` : ''} aria-label="${escapeHtml(thaiDate(day.date))} ${escapeHtml(label)}"><span>${day.number}</span>${abbr ? `<strong>${abbr}</strong>` : ''}</div>` : '<span aria-hidden="true"></span>';
-    }).join('')}</div><ul class="attendance-legend">${Object.entries(attendanceStates).map(([label, [abbr, tone]]) => `<li><span class="${tone}">${abbr}</span> ${label}</li>`).join('')}<li><span class="holiday">หยุด</span> = วันหยุดโรงเรียน</li><li>— ไม่มีรายการ</li></ul>
+    }).join('')}</div><ul class="attendance-legend">${['มา', 'มาสาย', 'ขาด', 'ลาป่วย'].map(label => {
+      const [abbr, tone] = attendanceStates[label];
+      return `<li><span class="${tone}">${abbr}</span> ${label === 'ลาป่วย' ? 'ลาป่วย/ลากิจ' : label}</li>`;
+    }).join('')}<li><span class="holiday">หยุด</span> = วันหยุดโรงเรียน</li><li>— ไม่มีรายการ</li></ul>
     <p class="month-summary">มา ${summary.มา} · สาย ${summary.มาสาย} · ขาด ${summary.ขาด} · ลา ${summary.ลา}</p>${!rows.some(row => row.attend_date.startsWith(month)) ? '<p class="muted">ยังไม่มีรายการเช็คชื่อในเดือนนี้</p>' : ''}`;
 }
 
@@ -501,6 +574,159 @@ function resourceMarkup(data) {
   if (!data || data.loading) return `<p class="data-status" role="status">${busyIcon()}กำลังโหลดข้อมูล…</p>`;
   if (data.error) return `<p class="field-error" role="alert">${escapeHtml(data.error)}</p><button class="button quiet retry-data">ลองใหม่</button>`;
   return '';
+}
+const healthFlags = [
+  ['drug_allergy', 'drug_allergy_none', 'แพ้ยา'],
+  ['food_allergy', 'food_allergy_none', 'แพ้อาหาร'],
+  ['chronic_disease', 'chronic_none', 'โรคประจำตัว'],
+];
+function profileText(value) { return String(value ?? '').trim(); }
+function homeroomTeachers(profile) {
+  return (Array.isArray(profile?.homeroom_teachers) ? profile.homeroom_teachers : []).map(profileText).filter(Boolean);
+}
+function healthWarnings(profile) { return healthFlags.filter(([field]) => profileText(profile[field])); }
+function formatEmergencyPhone(value) {
+  const text = profileText(value), digits = text.replace(/[\s()-]/g, '');
+  if (/^0\d{9}$/.test(digits)) return digits.replace(/^(\d{3})(\d{3})(\d{4})$/, '$1-$2-$3');
+  if (/^0\d{8}$/.test(digits)) return digits.replace(/^(\d{2})(\d{3})(\d{4})$/, '$1-$2-$3');
+  return text;
+}
+function profileStatus(data) {
+  if (!data || data.loading) return resourceMarkup(data);
+  if (data.error) {
+    return `<p class="field-error" role="alert">${escapeHtml(data.error)}</p><button id="retry-profile" class="button quiet" type="button">ลองใหม่</button>`;
+  }
+  return '';
+}
+export function profileMarkup(data) {
+  const status = profileStatus(data);
+  if (status) return `<section class="data-card" aria-label="ข้อมูลประจำตัว · สุขภาพ">${status}</section>`;
+  const profile = data.rows[0];
+  const teachers = homeroomTeachers(profile);
+  const warnings = healthWarnings(profile);
+  const healthValue = (field, none) => {
+    const text = profileText(profile[field]);
+    if (text) return [text];
+    return none && profile[none] === true ? ['ไม่มี'] : ['ยังไม่ได้บันทึก', true];
+  };
+  const infoRow = (label, value, muted = false) => `<div><dt>${label}</dt><dd${muted ? ' class="muted"' : ''}>${escapeHtml(value || '—')}</dd></div>`;
+  const placement = [classLabel(profile), profile.year && `ปีการศึกษา ${profile.year}`].filter(Boolean).join(' · ');
+  const updated = profile.profile_updated_at;
+  return `<section class="data-card profile-card"><h2>ข้อมูลประจำตัว</h2><dl>
+      ${infoRow('ชื่อเล่น', profileText(profile.nickname))}${infoRow('เลขประจำตัว', profileText(profile.student_no))}
+      ${infoRow('ชั้น/ห้อง', placement)}${infoRow('วันเกิด', validSchoolDate(profile.birth_date) ? thaiDate(profile.birth_date) : '')}
+    </dl></section>
+    <section class="data-card profile-card"><h2>ครูประจำชั้น</h2>${teachers.length
+      ? `<ul class="homeroom-list">${teachers.map(name => `<li>${escapeHtml(name)}</li>`).join('')}</ul>`
+      : '<p class="muted">ยังไม่ได้ระบุครูประจำชั้นปีนี้</p>'}</section>
+    <section class="data-card profile-card"><h2>สุขภาพ</h2>${warnings.length
+      ? `<ul class="health-alert">${warnings.map(([field, , label]) => `<li>${icon('alert')}<span><strong>${label}:</strong> ${escapeHtml(profileText(profile[field]))}</span></li>`).join('')}</ul>`
+      : ''}
+      <dl>${infoRow('กรุ๊ปเลือด', ...healthValue('blood_type'))}
+      ${[healthFlags[2], ...healthFlags.slice(0, 2)].map(([field, none, label]) => infoRow(label, ...healthValue(field, none))).join('')}
+      ${infoRow('ยาประจำ', ...healthValue('regular_meds'))}
+      ${infoRow('เบอร์ฉุกเฉิน', formatEmergencyPhone(profile.emergency_phone) || 'ยังไม่ได้บันทึก', !profileText(profile.emergency_phone))}</dl>
+      <p class="helper">ข้อมูลไม่ถูกต้อง แจ้งครูประจำชั้นเพื่อแก้ไข</p>
+      ${updated && Number.isFinite(Date.parse(updated)) ? `<p class="helper">ปรับปรุงล่าสุด ${escapeHtml(thaiDate(updated))}</p>` : ''}</section>`;
+}
+
+export function yearAttendance(rows, schoolDays, today) {
+  if (!schoolDays?.year_start) return null;
+  const counts = { มา: 0, มาสาย: 0, ขาด: 0, ลา: 0 };
+  for (const row of schoolYearAttendance(rows, schoolDays)) {
+    if (row.attend_date > today) continue;
+    if (row.status === 'ลาป่วย' || row.status === 'ลากิจ') counts.ลา++;
+    else if (Object.hasOwn(counts, row.status)) counts[row.status]++;
+  }
+  const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
+  const present = counts.มา + counts.มาสาย;
+  return total ? { present, total, percent: Math.round(present * 100 / total), absent: counts.ขาด,
+    leave: counts.ลา, late: counts.มาสาย, year: schoolDays.year } : null;
+}
+function attendanceStats(data, read) {
+  return data && !data.loading && !data.error ? yearAttendance(data.rows, read.schoolDays, read.today) : null;
+}
+function schoolYearLabel(year) { return year ? `ปีการศึกษา ${year}` : ''; }
+export function attendanceSummaryMarkup(data, read) {
+  const status = resourceMarkup(data);
+  const stats = attendanceStats(data, read);
+  return `<section class="data-card attendance-summary" aria-label="สรุปการมาเรียนปีการศึกษานี้">${status ||
+    (!stats ? '<p class="data-status">ยังไม่มีข้อมูลการมาเรียนปีการศึกษานี้</p>' : `<div class="attendance-overview">
+      <svg class="attendance-ring" viewBox="0 0 100 100" role="img" aria-label="มาเรียน ${stats.percent} เปอร์เซ็นต์">
+        <circle cx="50" cy="50" r="43" fill="none" stroke="var(--line)" stroke-width="8"/>
+        <circle cx="50" cy="50" r="43" fill="none" stroke="var(--teal)" stroke-width="8" pathLength="100"
+          stroke-dasharray="${stats.percent} 100" transform="rotate(-90 50 50)"/>
+        <text x="50" y="51" dominant-baseline="middle" text-anchor="middle">${stats.percent}%</text>
+      </svg><div><p><strong>มา ${stats.present} จาก ${stats.total} วันที่ครูเช็ค</strong></p>
+        <p class="muted">${escapeHtml(schoolYearLabel(stats.year))}</p>
+        <ul class="attendance-counts"><li class="absent">ขาด ${stats.absent}</li><li class="leave">ลา ${stats.leave}</li><li class="late">สาย ${stats.late}</li></ul>
+      </div></div>`)}</section>`;
+}
+export function childTodayMarkup(data, read) {
+  const row = data?.rows.find(item => item.attend_date === read.today);
+  const holiday = read.schoolDays?.holidays.find(item => item.date === read.today);
+  const weekend = [0, 6].includes(new Date(`${read.today}T12:00:00Z`).getUTCDay());
+  const status = {
+    มา: ['วันนี้มาเรียน', 'present', 'check'], มาสาย: ['วันนี้มาสาย', 'late', 'clock'],
+    ขาด: ['วันนี้ขาดเรียน', 'absent', 'alert'], ลาป่วย: ['วันนี้ลาป่วย', 'leave', 'calendar'],
+    ลากิจ: ['วันนี้ลากิจ', 'leave', 'calendar'],
+  }[row?.status];
+  let [label, tone, symbol] = status || ['ครูยังไม่เช็คชื่อวันนี้', 'unrecorded', 'clock'];
+  if (status && ['present', 'late'].includes(tone) && Number.isFinite(Date.parse(row.recorded_at))) {
+    const time = new Intl.DateTimeFormat('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
+    label += ` · เช็คชื่อ ${time.format(new Date(row.recorded_at))}`;
+  } else if (!status && (holiday || weekend)) {
+    [label, tone, symbol] = [`วันหยุด${holiday?.name ? ` · ${holiday.name}` : ''}`, 'holiday', 'calendar'];
+  } else if (!status && data?.error) {
+    [label, tone, symbol] = ['โหลดการมาเรียนวันนี้ไม่สำเร็จ', 'unrecorded', 'alert'];
+  } else if (!status && (!data || data.loading)) {
+    return `<p class="child-today unrecorded" role="status">${busyIcon()}<span>กำลังโหลดการมาเรียนวันนี้…</span></p>`;
+  }
+  return `<p class="child-today ${tone}" role="status">${icon(symbol)}<span>${escapeHtml(label)}</span></p>`;
+}
+
+function childTile(label, symbol, { href, value, detail, busy = false, warning = false } = {}) {
+  const content = `<span class="tile-icon">${icon(symbol)}</span><strong class="tile-label">${label}</strong>
+    ${value ? `<strong class="tile-value">${escapeHtml(value)}</strong>` : ''}
+    ${busy ? `<span class="tile-detail">${busyIcon()}กำลังโหลด…</span>`
+      : `<span class="tile-detail${warning ? ' tile-warning' : ''}">${warning ? icon('alert') : ''}${escapeHtml(detail)}</span>`}`;
+  return href ? `<a class="child-tile" href="${href}">${content}</a>`
+    : `<div class="child-tile tile-upcoming">${content}</div>`;
+}
+export function childTilesMarkup(child, data, read) {
+  const link = childHref(child.student_id), stats = attendanceStats(data?.attendance, read);
+  const secondary = isSecondary(child);
+  const grades = data?.grades, term = secondary ? latestReleasedTerm(grades) : null;
+  const entry = term && grades.entries.get(gradeTermKey(term));
+  const gradeBusy = secondary && (!grades || grades.terms.loading || !!term && (!entry || entry.loading));
+  const gpa = entry?.released && !entry.gpa.pending && Number.isFinite(entry.gpa.gpa) ? entry.gpa.gpa.toFixed(2) : '';
+  const balance = savingsBalance(data?.savings, read.money);
+  const paid = data?.payments.rows.reduce((latest, row) => validSchoolDate(row.paid_on) && row.paid_on > latest ? row.paid_on : latest, '');
+  const profile = data?.profile.rows[0];
+  const warnings = profile ? healthWarnings(profile) : [];
+  const hasHealth = profile && (['regular_meds', 'emergency_phone'].some(field => profileText(profile[field])) ||
+    healthFlags.some(([, none]) => profile[none] === true));
+  return childTile(childSections.attendance, 'attendance', {
+    href: link + '/attendance', value: stats && `${stats.percent}%`, busy: !data || data.attendance.loading,
+    detail: stats ? [schoolYearLabel(stats.year), `ขาด ${stats.absent} ลา ${stats.leave} สาย ${stats.late}`].filter(Boolean).join(' · ')
+      : data?.attendance.error ? 'ยังแสดงข้อมูลไม่ได้' : 'ยังไม่มีข้อมูล',
+  }) + childTile(childSections.grades, 'book', {
+    href: link + '/grades', value: gpa, busy: gradeBusy,
+    detail: !secondary ? 'เปิดให้ดูเร็ว ๆ นี้' : grades?.terms.error || entry?.error ? 'ยังแสดงผลการเรียนไม่ได้'
+      : entry?.released ? (gpa ? `เกรดเฉลี่ย ภาค ${term.term}/${term.year}` : 'ยังสรุปเกรดเฉลี่ยไม่ได้') : 'ยังไม่ประกาศผล',
+  }) + childTile(childSections.money, 'wallet', {
+    href: link + '/money', value: balance === null ? '' : baht(balance), busy: !data || data.savings.loading || read.moneyLoading,
+    detail: balance === null ? 'ยังแสดงยอดไม่ได้' : data.payments.loading ? 'กำลังโหลดประวัติการชำระ…'
+      : data.payments.error ? 'ยังแสดงประวัติการชำระไม่ได้' : validSchoolDate(paid)
+        ? `ชำระล่าสุด ${thaiDate(paid, { year: undefined })}` : 'ยังไม่มีประวัติการชำระ',
+  }) + childTile(childSections.profile, 'heart', {
+    href: link + '/profile', busy: !data || data.profile.loading, warning: warnings.length > 0,
+    detail: data?.profile.error ? 'ยังแสดงข้อมูลไม่ได้' : warnings.length === 1 && warnings[0][0] === 'drug_allergy' ? 'แพ้ยา 1 รายการ'
+      : warnings.length ? `มีข้อควรระวัง ${warnings.length} รายการ` : profileText(profile?.blood_type)
+        ? `กรุ๊ปเลือด ${profileText(profile.blood_type)}` : hasHealth ? 'ดูข้อมูลสุขภาพ' : 'โรงเรียนยังไม่ได้บันทึก',
+  }) + childTile('ยื่นใบลา', 'receipt', { href: `#leave/${encodeURIComponent(child.student_id)}`, detail: 'แจ้งลาป่วย/ลากิจ' }) +
+    [['กิจกรรม · สมรรถนะ', 'activity'], ['ตารางเรียน', 'clock'], ['รถรับส่ง', 'bus']].map(([label, symbol]) =>
+      childTile(label, symbol, { detail: 'เปิดให้ดูเร็ว ๆ นี้' })).join('');
 }
 export function savingsMarkup(data, money, expanded = false, moneyLoading = false) {
   const unavailable = resourceMarkup(data);
@@ -707,21 +933,39 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
   async function refreshOnReturn() {
     if (stopped || !state.session || state.signoutBusy || !state.loaded || state.loading ||
         state.read.loading || state.leaveDraft || state.leaveBusy || state.cancelBusyId || state.redeemBusy) return;
-    const page = routeFor(state, hash());
-    if (!['home', 'child', 'calendar'].includes(page)) return;
-    const studentId = page === 'child' ? hash().slice('#child/'.length) : '';
-    if (page === 'child' && !ownsChild(studentId)) return;
-    const scope = page === 'child' ? `child/${studentId}` : page;
+    const route = routeFor(state, hash());
+    if (!['home', 'child', 'childSection', 'calendar'].includes(route)) return;
+    const isChild = route === 'child' || route === 'childSection';
+    const { id: studentId, section } = isChild ? childLocation(hash()) : { id: '', section: '' };
+    if (isChild && !ownsChild(studentId)) return;
+    const page = isChild ? 'child' : route;
+    const scope = isChild ? `child/${studentId}${section ? `/${section}` : ''}` : page;
     const loadedAt = state.read.loadedAt[scope];
     if (loadedAt === undefined || now().getTime() - loadedAt <= 60_000) return;
     // Same read version/revisions guard every reply after reset, sign-out or account change.
-    return reads.load(state.children, { quiet: true, page, studentId });
+    return reads.load(state.children, { quiet: true, page, studentId, section });
+  }
+  async function loadChildPage(id, section) {
+    const route = routeFor(state, hash());
+    if (route !== 'child' && route !== 'childSection') return;
+    const location = childLocation(hash());
+    if (location.id !== id || location.section !== section || !ownsChild(id)) return;
+    if (!section) return Promise.all([reads.loadProfile(id), reads.loadGradeSummary(id)]);
+    if (section === 'profile') return reads.loadProfile(id);
+    if (section === 'grades') {
+      const grades = state.read.children[id]?.grades;
+      if (!grades?.started) return reads.loadGrades(id);
+      if (!grades.terms.loading && !grades.terms.error && grades.selected && !grades.entries.has(grades.selected)) {
+        return reads.selectGradeTerm(id, grades.selected);
+      }
+    }
   }
   return { state, start, signIn, redeem, signOut, loadChildren, acceptSession, notify, submitLeave, cancelLeave,
-    refreshOnReturn,
+    refreshOnReturn, loadChildPage,
     beginLeave(id) { if (ownsChild(id) && state.leaveDraft?.studentId !== String(id)) { state.leaveDraft = newLeaveDraft(id); state.leaveError = ''; } },
     discardLeave() { resetLeave(); },
     loadLeaves(id) { if (ownsChild(id)) return reads.loadLeaves(id); },
+    retryProfile(id) { if (ownsChild(id)) return reads.loadProfile(id, { force: true }); },
     loadGrades(id, options) { if (ownsChild(id)) return reads.loadGrades(id, options); },
     selectGradeTerm(id, key) { if (ownsChild(id)) return reads.selectGradeTerm(id, key); },
     loadData() { if (state.session && !state.signoutBusy && state.loaded) { resetLeave(); return reads.load(state.children); } },
@@ -756,6 +1000,12 @@ const icons = {
   bus: '<rect x="4" y="3" width="16" height="16" rx="3"/><path d="M4 11h16M8 3v8M16 3v8M7 19v2M17 19v2M8 15h.01M16 15h.01"/>',
   calendar: '<rect x="3" y="4" width="18" height="17" rx="3"/><path d="M8 2v4M16 2v4M3 10h18"/>',
   attendance: '<rect x="3" y="4" width="18" height="17" rx="3"/><path d="M8 2v4M16 2v4M3 10h18m-9 5 2 2 4-4"/>',
+  check: '<path d="m5 12 4 4L19 6"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  user: '<circle cx="12" cy="8" r="3.5"/><path d="M5 20v-1a7 7 0 0 1 14 0v1"/>',
+  heart: '<path d="M20.8 5.6a5.3 5.3 0 0 0-7.5 0L12 6.9l-1.3-1.3a5.3 5.3 0 1 0-7.5 7.5l8.8 8.4 8.8-8.4a5.3 5.3 0 0 0 0-7.5Z"/>',
+  alert: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4m0 4h.01"/>',
+  book: '<path d="M12 5v15M3 4h4a6 6 0 0 1 5 2.5A6 6 0 0 1 17 4h4v14h-4a6 6 0 0 0-5 2.5A6 6 0 0 0 7 18H3z"/>',
   wallet: '<rect x="2" y="6" width="20" height="14" rx="3"/><path d="M2 10h20M16 15h2"/>',
   bell: '<path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10 21h4"/>',
   home: '<path d="m3 11 9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
@@ -801,17 +1051,56 @@ export function thaiToday(date = new Date()) {
   return `${part('weekday').replace(/^วัน/, '')} ${part('day')} ${part('month')} ${part('year')}`;
 }
 
-export function bottomNavigation(route) {
-  return [['home', 'หน้าแรก', 'home'], ['calendar', 'ปฏิทิน', 'calendar'],
-    ['notifications', 'แจ้งเตือน', 'bell'], ['account', 'บัญชี', 'account']]
-    .map(([page, label, symbol]) => `<a href="#${page}"${page === route ? ' aria-current="page"' : ''}><span class="nav-icon">${icon(symbol)}</span><span>${label}</span></a>`).join('');
+export function bottomNavigation(route, childId) {
+  const active = ['childSection', 'leave'].includes(route) ? 'child' : route;
+  return [['home', '#home', 'วันนี้', 'home'], ['child', childHref(childId), 'ลูก', 'user'],
+    ['calendar', '#calendar', 'ปฏิทิน', 'calendar'], ['account', '#account', 'บัญชี', 'account']]
+    .map(([page, href, label, symbol]) => `<a href="${href}"${page === active ? ' aria-current="page"' : ''}><span class="nav-icon">${icon(symbol)}</span><span>${label}</span></a>`).join('');
 }
 
 export function childMarkup(child, index = 0) {
   return `<li class="child-card"><a class="child-card-link" href="#child/${encodeURIComponent(child.student_id)}"><div class="child-who"><span class="avatar tone-${childTone(index)}" aria-hidden="true">${escapeHtml(childInitials(child.name))}</span>
     <div class="child-info"><h2>${escapeHtml(child.name)}</h2><span class="grade-chip">${escapeHtml(classLabel(child))}</span>
     <p class="relation">คุณเป็น ${escapeHtml(child.relation)}</p></div></div>
-    ${child.status && child.status !== 'กำลังศึกษา' ? `<p><span class="student-status">สถานะ: ${escapeHtml(child.status)}</span></p>` : ''}<span class="child-open">ดูการมาเรียนและการเงิน ${icon('forward')}</span></a></li>`;
+    ${child.status && child.status !== 'กำลังศึกษา' ? `<p><span class="student-status">สถานะ: ${escapeHtml(child.status)}</span></p>` : ''}<span class="child-open">เปิดแฟ้มลูก ${icon('forward')}</span></a></li>`;
+}
+
+function childShortName(child, data) {
+  return profileText(data?.profile.rows[0]?.nickname) || profileText(child.nickname) || firstName(child.name);
+}
+function childHubMarkup(child, s) {
+  const id = String(child.student_id), data = s.read.children[id], profile = data?.profile.rows[0];
+  const children = s.children, index = children.indexOf(child), teachers = homeroomTeachers(profile);
+  const childrenNav = children.length < 2 ? '' : `<nav class="hub-children" aria-label="เลือกแฟ้มลูก">${children.map(item => {
+    const record = s.read.children[item.student_id];
+    const label = [childShortName(item, record), classLabel(record?.profile.rows[0] || item)].filter(Boolean).join(' · ');
+    return `<a href="${childHref(item.student_id)}"${item === child ? ' aria-current="page"' : ''}>${escapeHtml(label)}</a>`;
+  }).join('')}</nav>`;
+  const name = profile?.name || child.name;
+  const identity = [classLabel(profile || child), profile?.student_no && `เลขประจำตัว ${profile.student_no}`].filter(Boolean).join(' · ');
+  const loading = !data || data.profile.loading;
+  return `<section class="child-hub">
+    <header class="hub-header"><p>ลูกของคุณ</p>${childrenNav}</header>
+    <div class="hub-content">
+      <div class="hub-id data-card"><div class="child-who"><span class="avatar tone-${childTone(index)}" aria-hidden="true">${escapeHtml(childInitials(name))}</span>
+        <div class="child-info"><h1 tabindex="-1">${escapeHtml(name)}</h1>
+          <p class="hub-id-meta">${escapeHtml(identity)}</p>
+          ${teachers.length ? `<p class="hub-id-meta">ครูประจำชั้น ${escapeHtml(teachers.join(' · '))}</p>`
+            : loading ? '<p class="hub-id-meta" aria-hidden="true"></p>' : ''}
+        </div></div>
+        ${child.status && child.status !== 'กำลังศึกษา' ? `<span class="student-status">สถานะ: ${escapeHtml(child.status)}</span>` : ''}
+      </div>
+      ${data?.profile.error ? `<div class="data-card hub-profile-error">${profileStatus(data.profile)}</div>` : ''}
+      ${childTodayMarkup(data?.attendance, s.read)}
+      <h2>ดูข้อมูลลูก</h2><div class="child-tiles">${childTilesMarkup(child, data, s.read)}</div>
+    </div></section>`;
+}
+function childSectionMarkup(child, section, data) {
+  const name = childShortName(child, data);
+  return `<header class="child-section-header">
+    <a class="button child-section-back" href="${childHref(child.student_id)}">${icon('back')}${escapeHtml(name ? `แฟ้มของ${name}` : 'แฟ้มลูก')}</a>
+    <h1 tabindex="-1">${childSections[section]}</h1><p>${escapeHtml(child.name)}</p>
+  </header>`;
 }
 
 export function mountParentApp(sb, win = window, doc = document, initialPrompt = null, updates = null) {
@@ -820,7 +1109,8 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
   const success = doc.getElementById('success-message');
   let previousRoute = '', previousView = '', deferredPrompt = initialPrompt, installBusy = false, installError = '';
   let selectedChildId = null, filterAccountId = null;
-  let detailChildId = null, detailMonth = '', expandedSavings = false, homeScroll = 0, homeFilterScroll = 0;
+  let lastChildId = null, detailChildId = null, detailMonth = '', expandedSavings = false, homeScroll = 0, homeFilterScroll = 0;
+  const hubScroll = new Map();
   let closeDialog = null;
   let dismissed = false;
   try { dismissed = win.localStorage.getItem(INSTALL_DISMISSED_KEY) === '1'; } catch { /* Private mode: session-only preference. */ }
@@ -866,10 +1156,14 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
     const activeId = doc.activeElement?.id;
     const activeHeading = doc.activeElement?.tagName === 'H1';
     const activeHref = doc.activeElement?.closest('a')?.getAttribute('href');
+    const activeInNav = nav.contains(doc.activeElement);
     const selection = ['invite-code', 'leave-reason'].includes(activeId)
       ? [doc.activeElement.selectionStart, doc.activeElement.selectionEnd] : null;
     const filterScroll = main.querySelector('.child-filters')?.scrollLeft || 0;
-    const view = ['child', 'leave'].includes(route) ? win.location.hash : route;
+    const isChildRoute = ['child', 'childSection', 'childMissing', 'leave'].includes(route);
+    const view = isChildRoute ? win.location.hash : route;
+    const { id, section } = isChildRoute ? childLocation(view) : {};
+    const child = route !== 'childMissing' && s.children.find(row => String(row.student_id) === id);
     // คืนเส้นทางฟอร์มก่อนถาม รวมถึงกรณีกดปุ่มย้อนกลับของเบราว์เซอร์
     if (previousRoute === 'leave' && previousView !== view && s.session?.user?.id === filterAccountId &&
         s.leaveDraft && (s.leaveDraft.dirty || s.leaveBusy)) {
@@ -886,23 +1180,28 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
     }
     const openDetails = view === previousView ? [...main.querySelectorAll('details')].map(detail => detail.open) : [];
     if (previousRoute === 'home') { homeScroll = win.scrollY; homeFilterScroll = filterScroll; }
+    if (previousRoute === 'child' && detailChildId) hubScroll.set(detailChildId, win.scrollY);
     const focusRoute = view !== previousView;
-    const returningHome = route === 'home' && previousRoute === 'child';
+    const returningHome = route === 'home' && ['child', 'childSection'].includes(previousRoute);
+    const returningHub = route === 'child' && ['childSection', 'leave'].includes(previousRoute) && childLocation(previousView).id === id;
     if (previousRoute === 'leave' && view !== previousView && s.leaveDraft) controller.discardLeave();
     previousRoute = route; previousView = view;
-    if (['login', 'home', 'redeem', 'calendar', 'notifications', 'account'].includes(route) && win.location.hash !== `#${route}`) {
+    if (['login', 'home', 'redeem', 'calendar', 'account'].includes(route) && win.location.hash !== `#${route}`) {
       win.history.replaceState(null, '', `#${route}`);
     }
     if (filterAccountId !== s.session?.user?.id) {
       closeDialog?.(false);
       selectedChildId = null; filterAccountId = s.session?.user?.id;
-      detailChildId = null; detailMonth = ''; expandedSavings = false; homeScroll = 0; homeFilterScroll = 0;
+      lastChildId = null; detailChildId = null; detailMonth = ''; expandedSavings = false; homeScroll = 0; homeFilterScroll = 0;
+      hubScroll.clear();
     }
     if (selectedChildId !== null && !s.children.some(child => String(child.student_id) === selectedChildId)) selectedChildId = null;
+    if (child) lastChildId = id;
+    const navChild = s.children.find(row => String(row.student_id) === lastChildId) || s.children[0];
     app.dataset.screen = route;
     const hasNav = !!s.session && s.children.length > 0;
     app.classList.toggle('with-nav', hasNav);
-    nav.hidden = !hasNav; nav.innerHTML = hasNav ? bottomNavigation(['child', 'leave'].includes(route) ? 'home' : route) : '';
+    nav.hidden = !hasNav; nav.innerHTML = hasNav ? bottomNavigation(route, navChild.student_id) : '';
     doc.documentElement.classList.toggle('has-bottom-nav', hasNav);
     doc.getElementById('school-brand').hidden = !['loading', 'error'].includes(route);
     doc.getElementById('site-footer').hidden = !['loading', 'error'].includes(route);
@@ -968,11 +1267,10 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         }
       });
     } else if (route === 'home') {
-      doc.title = 'หน้าแรก — CRS MIS';
+      doc.title = 'วันนี้ — CRS MIS';
       const summary = homeSummary(filterChildren(s.children, selectedChildId), s.read);
       const feed = splitFeed(s.read.feed.rows, s.children, selectedChildId, s.read.today);
-      main.innerHTML = `<section><header class="home-header"><div class="home-greeting"><div><p class="today-date">${escapeHtml(thaiToday())}</p><h1 tabindex="-1">${escapeHtml(guardianGreeting(s.children))}</h1></div>
-        <a class="button bell-button" href="#notifications" aria-label="ดูแจ้งเตือน">${icon('bell')}</a></div></header>
+      main.innerHTML = `<section><header class="home-header"><p class="today-date">${escapeHtml(thaiToday())}</p><h1 tabindex="-1">${escapeHtml(guardianGreeting(s.children))}</h1></header>
         <div class="child-filters" role="group" aria-label="กรองตามลูก"><button id="child-filter-all" class="filter-chip" aria-pressed="${selectedChildId === null}">ทุกคน</button>
         ${s.children.map((child, index) => `<button id="child-filter-${index}" class="filter-chip" data-child-id="${escapeHtml(child.student_id)}" aria-label="ดูข้อมูลของ ${escapeHtml(child.name)}" aria-pressed="${String(child.student_id) === selectedChildId}">${escapeHtml(firstName(child.nickname || child.name) || 'ลูกของฉัน')}</button>`).join('')}</div>
         <div class="home-content"><div class="summary-grid"><div aria-busy="${summary.attendanceBusy}"><h2>มาเรียนวันนี้</h2><strong>${summary.attendanceBusy ? busyIcon() : ''}${escapeHtml(summary.attendance)}</strong><p>${escapeHtml(summary.attendanceDetail)}</p></div><div aria-busy="${summary.savingsBusy}"><h2>เงินออมรวม</h2><strong>${summary.savingsBusy ? busyIcon() : ''}${escapeHtml(summary.savings)}</strong><p>ของลูกที่เลือก</p></div></div>
@@ -999,101 +1297,102 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         catch { installError = 'ยังติดตั้งไม่สำเร็จ โปรดลองอีกครั้ง'; }
         finally { installBusy = false; controller.notify(); main.querySelector('a[href="#redeem"]')?.focus(); }
       });
-    } else if (route === 'child') {
-      let id = '';
-      try { id = decodeURIComponent(win.location.hash.slice('#child/'.length)); } catch { /* Invalid URL is treated as unknown child. */ }
-      const child = s.children.find(row => String(row.student_id) === id);
+    } else if (isChildRoute && !child) {
+      doc.title = 'ไม่พบข้อมูลลูก — CRS MIS';
+      main.innerHTML = '<section class="screen-page"><h1 tabindex="-1">ไม่พบข้อมูลลูก</h1><p class="muted">บัญชีนี้ยังไม่ได้ผูกกับนักเรียนที่ระบุ</p><a class="button secondary" href="#home">กลับหน้าวันนี้</a></section>';
+    } else if (route === 'child' || route === 'childSection') {
       const data = s.read.children[id];
       if (detailChildId !== id) { detailChildId = id; detailMonth = s.read.today.slice(0, 7); expandedSavings = false; }
-      doc.title = `${child?.name || 'ไม่พบข้อมูลลูก'} — CRS MIS`;
-      if (!child) {
-        main.innerHTML = '<section class="screen-page"><h1 tabindex="-1">ไม่พบข้อมูลลูก</h1><p class="muted">บัญชีนี้ยังไม่ได้ผูกกับนักเรียนที่ระบุ</p><a class="button secondary" href="#home">กลับหน้าแรก</a></section>';
+      const title = section ? `${childSections[section]} · ${child.name}` : child.name;
+      doc.title = `${title} — CRS MIS`;
+      if (!section) {
+        main.innerHTML = childHubMarkup(child, s);
       } else {
-        main.innerHTML = `<section class="screen-page child-screen"><a class="button quiet detail-back" href="#home">${icon('back')}กลับหน้าแรก</a><h1 tabindex="-1">${escapeHtml(child.name)}</h1><p class="muted">${escapeHtml(classLabel(child))}</p>
-          <section class="data-card" aria-busy="${!data || data.attendance.loading}"><h2>การมาเรียน</h2>${resourceMarkup(data?.attendance) || attendanceMarkup(data.attendance.rows, detailMonth, s.read.today, s.read.schoolDays)}</section>
-          <section class="data-card" aria-labelledby="grades-heading" aria-busy="${isSecondary(child) && (!data || data.grades.terms.loading || !!data.grades.entries.get(data.grades.selected)?.loading)}"><h2 id="grades-heading">ผลการเรียน</h2>${gradesMarkup(child, data?.grades)}</section>
-          <section class="data-card" aria-busy="${!data || data.leaves.loading || !!s.cancelBusyId}"><h2 id="leave-heading" tabindex="-1">ใบลา</h2><a class="button primary full" href="#leave/${encodeURIComponent(id)}">ยื่นใบลา</a>${leaveListMarkup(data?.leaves, s.cancelBusyId)}<p class="field-error" role="alert">${escapeHtml(s.cancelError)}</p><button type="button" id="reload-leaves" class="button secondary">โหลดรายการใบลาอีกครั้ง</button></section>
-          <section class="data-card" aria-busy="${!data || data.savings.loading || s.read.moneyLoading}"><h2>เงินออม</h2>${savingsMarkup(data?.savings, s.read.money, expandedSavings, s.read.moneyLoading)}</section>
-          <section class="data-card" aria-busy="${!data || data.payments.loading}"><h2>ประวัติการชำระ</h2>${paymentsMarkup(data?.payments)}</section></section>`;
-        if (data && isSecondary(child) && !data.grades.started) void Promise.resolve().then(() => controller.loadGrades(id));
-        main.querySelectorAll('[data-grade-term]').forEach(button => button.addEventListener('click', () => {
-          void controller.selectGradeTerm(id, button.dataset.gradeTerm);
-        }));
-        main.querySelector('#retry-grades')?.addEventListener('click', () => { void controller.loadGrades(id, { force: true }); });
-        main.querySelector('#reload-leaves').addEventListener('click', () => { void controller.loadLeaves(id); });
-        main.querySelectorAll('.cancel-leave').forEach(button => button.addEventListener('click', async () => {
-          const record = s.read.children[id];
-          const accepted = await askLeaveConfirmation('ยกเลิกใบลา?', 'ใบลาที่ยกเลิกจะไม่ส่งให้ครูพิจารณาต่อ', 'ยกเลิกใบลา');
-          if (accepted && state.read.children[id] === record) {
-            await controller.cancelLeave(id, button.dataset.id);
-            if (state.read.children[id] === record && win.location.hash === `#child/${encodeURIComponent(id)}`) main.querySelector('#leave-heading')?.focus();
-          }
-        }));
-        main.querySelector('#previous-month')?.addEventListener('click', () => { detailMonth = monthShift(detailMonth, -1); controller.notify(); });
-        main.querySelector('#next-month')?.addEventListener('click', () => { detailMonth = monthShift(detailMonth, 1); controller.notify(); });
-        main.querySelector('#expand-savings')?.addEventListener('click', () => { expandedSavings = !expandedSavings; controller.notify(); });
-      }
-    } else if (route === 'leave') {
-      let id = '';
-      try { id = decodeURIComponent(win.location.hash.slice('#leave/'.length)); } catch { /* แสดงหน้าข้อมูลลูกไม่พบ */ }
-      const child = s.children.find(row => String(row.student_id) === id);
-      doc.title = 'ยื่นใบลา — CRS MIS';
-      if (!child) {
-        main.innerHTML = '<section class="screen-page"><h1 tabindex="-1">ไม่พบข้อมูลลูก</h1><p class="muted">บัญชีนี้ยังไม่ได้ผูกกับนักเรียนที่ระบุ</p><a class="button secondary" href="#home">กลับหน้าแรก</a></section>';
-      } else {
-        if (!s.leaveDraft && s.leaveBusy) {
-          // ส่งสำเร็จแล้ว กำลังโหลดรายการใหม่ รอเปลี่ยนกลับหน้าลูก
-          main.innerHTML = '<section class="screen-page"><h1 tabindex="-1">ยื่นใบลา</h1><p role="status">ส่งใบลาแล้ว รอครูประจำชั้นอนุมัติ</p></section>';
-          return;
+        let content;
+        if (section === 'attendance') {
+          content = `${attendanceSummaryMarkup(data?.attendance, s.read)}
+            ${data && !data.attendance.loading && !data.attendance.error
+              ? `<section class="data-card"><h2>ปฏิทินการมาเรียน</h2>${attendanceMarkup(data.attendance.rows, detailMonth, s.read.today, s.read.schoolDays)}</section>` : ''}
+            <section class="data-card" aria-busy="${!data || data.leaves.loading || !!s.cancelBusyId}"><h2 id="leave-heading" tabindex="-1">ใบลา</h2><a class="button primary full" href="#leave/${encodeURIComponent(id)}">ยื่นใบลา</a>${leaveListMarkup(data?.leaves, s.cancelBusyId)}<p class="field-error" role="alert">${escapeHtml(s.cancelError)}</p><button type="button" id="reload-leaves" class="button secondary">โหลดรายการใบลาอีกครั้ง</button></section>`;
+        } else if (section === 'grades') {
+          content = `<section class="data-card" aria-label="ผลการเรียน" aria-busy="${isSecondary(child) && (!data || data.grades.terms.loading || !!data.grades.entries.get(data.grades.selected)?.loading)}">${gradesMarkup(child, data?.grades)}</section>`;
+        } else if (section === 'money') {
+          content = `<section class="data-card" aria-busy="${!data || data.savings.loading || s.read.moneyLoading}"><h2>เงินออม</h2>${savingsMarkup(data?.savings, s.read.money, expandedSavings, s.read.moneyLoading)}</section>
+            <section class="data-card" aria-busy="${!data || data.payments.loading}"><h2>ประวัติการชำระ</h2>${paymentsMarkup(data?.payments)}</section>`;
+        } else {
+          content = profileMarkup(data?.profile);
         }
-        controller.beginLeave(id);
-        const draft = s.leaveDraft;
-        main.innerHTML = `<section class="screen-page child-screen"><a class="button quiet detail-back" href="#child/${encodeURIComponent(id)}">${icon('back')}กลับหน้าลูก</a><h1 tabindex="-1">ยื่นใบลา</h1><p class="muted">${escapeHtml(child.name)}</p><div class="data-card">${leaveFormMarkup(draft, s.read.schoolDays, s.leaveBusy, s.leaveError)}</div></section>`;
-        const form = main.querySelector('#leave-form');
-        const update = event => {
-          const field = event.target.name;
-          if (!['leave_type', 'start_date', 'end_date', 'reason'].includes(field) || s.leaveBusy) return;
-          draft[field] = event.target.value; draft.dirty = true;
-          // ไม่วาด textarea ใหม่ระหว่างพิมพ์หรือประกอบอักษร เพื่อคงตำแหน่งเคอร์เซอร์
-          if (field === 'reason') main.querySelector('#reason-count').textContent = `${Array.from(draft.reason).length}/500 ตัวอักษร`;
-          else controller.notify();
-        };
-        form.addEventListener('input', update);
-        form.addEventListener('focusout', event => {
-          const field = event.target.name;
-          if (!['leave_type', 'start_date', 'end_date', 'reason'].includes(field)) return;
-          const validation = validateLeave(draft);
-          if (validation[field]) draft.errors[field] = validation[field]; else delete draft.errors[field];
-          if (!validation[field]) {
-            form.querySelector(`#leave-errors li[data-field="${field}"]`)?.remove();
-            if (!Object.keys(draft.errors).length) form.querySelector('#leave-errors')?.remove();
-          }
-          const target = form.querySelector(`#${field}-error`);
-          target.textContent = draft.errors[field] || '';
-          form.querySelectorAll(`[name="${field}"]`).forEach(input => input.setAttribute('aria-invalid', String(!!draft.errors[field])));
-        });
-        form.addEventListener('submit', async event => {
-          event.preventDefault();
-          const submittedDraft = draft, accountId = s.session.user.id, record = s.read.children[id];
-          if (await controller.submitLeave()) {
-            if (state.session?.user.id === accountId && state.read.children[id] === record && !state.leaveDraft?.dirty && win.location.hash === `#leave/${encodeURIComponent(id)}`) win.location.hash = `#child/${encodeURIComponent(id)}`;
-          } else if (state.leaveDraft === submittedDraft) {
-            (main.querySelector('#leave-errors') || main.querySelector('#leave-error'))?.focus();
-          }
-        });
-        main.querySelector('#leave-error').tabIndex = -1;
-        main.querySelectorAll('#leave-errors a').forEach(link => link.addEventListener('click', event => {
-          event.preventDefault(); main.querySelector(link.getAttribute('href'))?.focus();
-        }));
+        main.innerHTML = `<section class="child-section">${childSectionMarkup(child, section, data)}<div class="child-section-content">${content}</div></section>`;
       }
+      if (data && ['', 'profile', 'grades'].includes(section)) {
+        void Promise.resolve().then(() => controller.loadChildPage(id, section));
+      }
+      main.querySelector('#retry-profile')?.addEventListener('click', () => { void controller.retryProfile(id); });
+      main.querySelectorAll('[data-grade-term]').forEach(button => button.addEventListener('click', () => {
+        void controller.selectGradeTerm(id, button.dataset.gradeTerm);
+      }));
+      main.querySelector('#retry-grades')?.addEventListener('click', () => { void controller.loadGrades(id, { force: true }); });
+      main.querySelector('#reload-leaves')?.addEventListener('click', () => { void controller.loadLeaves(id); });
+      main.querySelectorAll('.cancel-leave').forEach(button => button.addEventListener('click', async () => {
+        const record = s.read.children[id];
+        const accepted = await askLeaveConfirmation('ยกเลิกใบลา?', 'ใบลาที่ยกเลิกจะไม่ส่งให้ครูพิจารณาต่อ', 'ยกเลิกใบลา');
+        if (accepted && state.read.children[id] === record) {
+          await controller.cancelLeave(id, button.dataset.id);
+          if (state.read.children[id] === record && win.location.hash === view) main.querySelector('#leave-heading')?.focus();
+        }
+      }));
+      main.querySelector('#previous-month')?.addEventListener('click', () => { detailMonth = monthShift(detailMonth, -1); controller.notify(); });
+      main.querySelector('#next-month')?.addEventListener('click', () => { detailMonth = monthShift(detailMonth, 1); controller.notify(); });
+      main.querySelector('#expand-savings')?.addEventListener('click', () => { expandedSavings = !expandedSavings; controller.notify(); });
+    } else if (route === 'leave') {
+      doc.title = 'ยื่นใบลา — CRS MIS';
+      if (!s.leaveDraft && s.leaveBusy) {
+        // ส่งสำเร็จแล้ว กำลังโหลดรายการใหม่ รอเปลี่ยนกลับหน้าลูก
+        main.innerHTML = '<section class="screen-page"><h1 tabindex="-1">ยื่นใบลา</h1><p role="status">ส่งใบลาแล้ว รอครูประจำชั้นอนุมัติ</p></section>';
+        return;
+      }
+      controller.beginLeave(id);
+      const draft = s.leaveDraft;
+      main.innerHTML = `<section class="screen-page child-screen"><a class="button quiet detail-back" href="#child/${encodeURIComponent(id)}">${icon('back')}กลับหน้าลูก</a><h1 tabindex="-1">ยื่นใบลา</h1><p class="muted">${escapeHtml(child.name)}</p><div class="data-card">${leaveFormMarkup(draft, s.read.schoolDays, s.leaveBusy, s.leaveError)}</div></section>`;
+      const form = main.querySelector('#leave-form');
+      const update = event => {
+        const field = event.target.name;
+        if (!['leave_type', 'start_date', 'end_date', 'reason'].includes(field) || s.leaveBusy) return;
+        draft[field] = event.target.value; draft.dirty = true;
+        // ไม่วาด textarea ใหม่ระหว่างพิมพ์หรือประกอบอักษร เพื่อคงตำแหน่งเคอร์เซอร์
+        if (field === 'reason') main.querySelector('#reason-count').textContent = `${Array.from(draft.reason).length}/500 ตัวอักษร`;
+        else controller.notify();
+      };
+      form.addEventListener('input', update);
+      form.addEventListener('focusout', event => {
+        const field = event.target.name;
+        if (!['leave_type', 'start_date', 'end_date', 'reason'].includes(field)) return;
+        const validation = validateLeave(draft);
+        if (validation[field]) draft.errors[field] = validation[field]; else delete draft.errors[field];
+        if (!validation[field]) {
+          form.querySelector(`#leave-errors li[data-field="${field}"]`)?.remove();
+          if (!Object.keys(draft.errors).length) form.querySelector('#leave-errors')?.remove();
+        }
+        const target = form.querySelector(`#${field}-error`);
+        target.textContent = draft.errors[field] || '';
+        form.querySelectorAll(`[name="${field}"]`).forEach(input => input.setAttribute('aria-invalid', String(!!draft.errors[field])));
+      });
+      form.addEventListener('submit', async event => {
+        event.preventDefault();
+        const submittedDraft = draft, accountId = s.session.user.id, record = s.read.children[id];
+        if (await controller.submitLeave()) {
+          if (state.session?.user.id === accountId && state.read.children[id] === record && !state.leaveDraft?.dirty && win.location.hash === `#leave/${encodeURIComponent(id)}`) win.location.hash = childHref(id) + '/attendance';
+        } else if (state.leaveDraft === submittedDraft) {
+          (main.querySelector('#leave-errors') || main.querySelector('#leave-error'))?.focus();
+        }
+      });
+      main.querySelector('#leave-error').tabIndex = -1;
+      main.querySelectorAll('#leave-errors a').forEach(link => link.addEventListener('click', event => {
+        event.preventDefault(); main.querySelector(link.getAttribute('href'))?.focus();
+      }));
     } else if (route === 'calendar') {
       doc.title = 'ปฏิทิน — CRS MIS';
       main.innerHTML = `<section class="screen-page"><p class="eyebrow">CRS MIS</p><h1 tabindex="-1">ปฏิทิน</h1><div aria-busy="${s.read.calendar.loading}">${calendarMarkup(s.read.calendar)}</div></section>`;
-    } else if (route === 'notifications') {
-      const title = 'แจ้งเตือน';
-      doc.title = `${title} — CRS MIS`;
-      main.innerHTML = `<section class="screen-page"><p class="eyebrow">CRS MIS</p><h1 tabindex="-1">${title}</h1>
-        <div class="empty-page"><span class="empty-icon">${icon('bell')}</span><h2>แจ้งเตือนจะเปิดให้ดูเร็ว ๆ นี้</h2><p>เมื่อลูกขาดเรียน มีผลใบลา หรือมีใบแจ้งหนี้ จะแสดงที่นี่</p></div></section>`;
     } else if (route === 'account') {
       doc.title = 'บัญชี — CRS MIS';
       main.innerHTML = `<section class="screen-page account-screen"><p class="eyebrow">CRS MIS</p><h1 tabindex="-1">บัญชี</h1>
@@ -1107,11 +1406,11 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
     main.querySelectorAll('details').forEach((detail, index) => { detail.open = openDetails[index] || false; });
     if (focusRoute) {
       main.querySelector('h1')?.focus();
-      win.scrollTo(0, returningHome ? homeScroll : 0);
+      win.scrollTo(0, returningHome ? homeScroll : returningHub ? hubScroll.get(id) || 0 : 0);
     }
     else if (activeId || activeHeading || activeHref) {
       const target = activeId ? doc.getElementById(activeId) : activeHeading ? main.querySelector('h1')
-        : [...doc.querySelectorAll('a')].find(link => link.getAttribute('href') === activeHref);
+        : [...(activeInNav ? nav : doc).querySelectorAll('a')].find(link => link.getAttribute('href') === activeHref);
       if (target && !target.disabled) {
         target.focus({ preventScroll: true });
         if (selection) target.setSelectionRange(...selection);
@@ -1140,7 +1439,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
   const onPageHide = () => {
     closeDialog?.(false);
     controller.stop();
-    selectedChildId = null; filterAccountId = null;
+    selectedChildId = null; filterAccountId = null; lastChildId = null; hubScroll.clear();
     main.replaceChildren(); account.replaceChildren(); nav.replaceChildren(); nav.hidden = true; success.textContent = ''; success.hidden = true;
   };
   win.addEventListener('pageshow', onPageShow);
