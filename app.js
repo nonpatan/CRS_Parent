@@ -24,7 +24,7 @@ const childSections = {
   attendance: 'การมาเรียน',
   grades: 'ผลการเรียน',
   money: 'เงินออม · การชำระ',
-  profile: 'ข้อมูลประจำตัว · สุขภาพ',
+  profile: 'ข้อมูลประจำตัว',
 };
 
 function childLocation(hash) {
@@ -581,6 +581,13 @@ const healthFlags = [
   ['chronic_disease', 'chronic_none', 'โรคประจำตัว'],
 ];
 function profileText(value) { return String(value ?? '').trim(); }
+function loadedProfile(data) { return data && !data.loading && !data.error ? data.rows[0] : undefined; }
+export function hasHealthData(profile) {
+  if (!profile) return false;
+  return ['blood_type', 'regular_meds', 'emergency_phone'].some(field => profileText(profile[field])) ||
+    healthFlags.some(([field, none]) => profileText(profile[field]) || profile[none] === true);
+}
+function profileLabel(hasHealth) { return hasHealth ? `${childSections.profile} · สุขภาพ` : childSections.profile; }
 function homeroomTeachers(profile) {
   return (Array.isArray(profile?.homeroom_teachers) ? profile.homeroom_teachers : []).map(profileText).filter(Boolean);
 }
@@ -600,10 +607,12 @@ function profileStatus(data) {
 }
 export function profileMarkup(data) {
   const status = profileStatus(data);
-  if (status) return `<section class="data-card" aria-label="ข้อมูลประจำตัว · สุขภาพ">${status}</section>`;
+  if (status) return `<section class="data-card" aria-label="${childSections.profile}">${status}</section>`;
   const profile = data.rows[0];
   const teachers = homeroomTeachers(profile);
+  const hasHealth = hasHealthData(profile);
   const warnings = healthWarnings(profile);
+  const correction = '<p class="helper">ข้อมูลไม่ถูกต้อง แจ้งครูประจำชั้นเพื่อแก้ไข</p>';
   const healthValue = (field, none) => {
     const text = profileText(profile[field]);
     if (text) return [text];
@@ -615,19 +624,19 @@ export function profileMarkup(data) {
   return `<section class="data-card profile-card"><h2>ข้อมูลประจำตัว</h2><dl>
       ${infoRow('ชื่อเล่น', profileText(profile.nickname))}${infoRow('เลขประจำตัว', profileText(profile.student_no))}
       ${infoRow('ชั้น/ห้อง', placement)}${infoRow('วันเกิด', validSchoolDate(profile.birth_date) ? thaiDate(profile.birth_date) : '')}
-    </dl></section>
+    </dl>${hasHealth ? '' : correction}</section>
     <section class="data-card profile-card"><h2>ครูประจำชั้น</h2>${teachers.length
       ? `<ul class="homeroom-list">${teachers.map(name => `<li>${escapeHtml(name)}</li>`).join('')}</ul>`
       : '<p class="muted">ยังไม่ได้ระบุครูประจำชั้นปีนี้</p>'}</section>
-    <section class="data-card profile-card"><h2>สุขภาพ</h2>${warnings.length
+    ${hasHealth ? `<section class="data-card profile-card"><h2>สุขภาพ</h2>${warnings.length
       ? `<ul class="health-alert">${warnings.map(([field, , label]) => `<li>${icon('alert')}<span><strong>${label}:</strong> ${escapeHtml(profileText(profile[field]))}</span></li>`).join('')}</ul>`
       : ''}
       <dl>${infoRow('กรุ๊ปเลือด', ...healthValue('blood_type'))}
       ${[healthFlags[2], ...healthFlags.slice(0, 2)].map(([field, none, label]) => infoRow(label, ...healthValue(field, none))).join('')}
       ${infoRow('ยาประจำ', ...healthValue('regular_meds'))}
       ${infoRow('เบอร์ฉุกเฉิน', formatEmergencyPhone(profile.emergency_phone) || 'ยังไม่ได้บันทึก', !profileText(profile.emergency_phone))}</dl>
-      <p class="helper">ข้อมูลไม่ถูกต้อง แจ้งครูประจำชั้นเพื่อแก้ไข</p>
-      ${updated && Number.isFinite(Date.parse(updated)) ? `<p class="helper">ปรับปรุงล่าสุด ${escapeHtml(thaiDate(updated))}</p>` : ''}</section>`;
+      ${correction}
+      ${updated && Number.isFinite(Date.parse(updated)) ? `<p class="helper">ปรับปรุงล่าสุด ${escapeHtml(thaiDate(updated))}</p>` : ''}</section>` : ''}`;
 }
 
 export function yearAttendance(rows, schoolDays, today) {
@@ -702,10 +711,9 @@ export function childTilesMarkup(child, data, read) {
   const gpa = entry?.released && !entry.gpa.pending && Number.isFinite(entry.gpa.gpa) ? entry.gpa.gpa.toFixed(2) : '';
   const balance = savingsBalance(data?.savings, read.money);
   const paid = data?.payments.rows.reduce((latest, row) => validSchoolDate(row.paid_on) && row.paid_on > latest ? row.paid_on : latest, '');
-  const profile = data?.profile.rows[0];
-  const warnings = profile ? healthWarnings(profile) : [];
-  const hasHealth = profile && (['regular_meds', 'emergency_phone'].some(field => profileText(profile[field])) ||
-    healthFlags.some(([, none]) => profile[none] === true));
+  const profile = loadedProfile(data?.profile), hasHealth = hasHealthData(profile);
+  const warnings = hasHealth ? healthWarnings(profile) : [];
+  const bloodType = profileText(profile?.blood_type), studentNo = profileText(profile?.student_no);
   return childTile(childSections.attendance, 'attendance', {
     href: link + '/attendance', value: stats && `${stats.percent}%`, busy: !data || data.attendance.loading,
     detail: stats ? [schoolYearLabel(stats.year), `ขาด ${stats.absent} ลา ${stats.leave} สาย ${stats.late}`].filter(Boolean).join(' · ')
@@ -719,11 +727,11 @@ export function childTilesMarkup(child, data, read) {
     detail: balance === null ? 'ยังแสดงยอดไม่ได้' : data.payments.loading ? 'กำลังโหลดประวัติการชำระ…'
       : data.payments.error ? 'ยังแสดงประวัติการชำระไม่ได้' : validSchoolDate(paid)
         ? `ชำระล่าสุด ${thaiDate(paid, { year: undefined })}` : 'ยังไม่มีประวัติการชำระ',
-  }) + childTile(childSections.profile, 'heart', {
+  }) + childTile(profileLabel(hasHealth), hasHealth ? 'heart' : 'user', {
     href: link + '/profile', busy: !data || data.profile.loading, warning: warnings.length > 0,
     detail: data?.profile.error ? 'ยังแสดงข้อมูลไม่ได้' : warnings.length === 1 && warnings[0][0] === 'drug_allergy' ? 'แพ้ยา 1 รายการ'
-      : warnings.length ? `มีข้อควรระวัง ${warnings.length} รายการ` : profileText(profile?.blood_type)
-        ? `กรุ๊ปเลือด ${profileText(profile.blood_type)}` : hasHealth ? 'ดูข้อมูลสุขภาพ' : 'โรงเรียนยังไม่ได้บันทึก',
+      : warnings.length ? `มีข้อควรระวัง ${warnings.length} รายการ` : bloodType ? `กรุ๊ปเลือด ${bloodType}`
+        : hasHealth ? 'ดูข้อมูลสุขภาพ' : studentNo ? `เลขประจำตัว ${studentNo}` : 'ดูข้อมูลประจำตัว',
   }) + childTile('ยื่นใบลา', 'receipt', { href: `#leave/${encodeURIComponent(child.student_id)}`, detail: 'แจ้งลาป่วย/ลากิจ' }) +
     [['กิจกรรม · สมรรถนะ', 'activity'], ['ตารางเรียน', 'clock'], ['รถรับส่ง', 'bus']].map(([label, symbol]) =>
       childTile(label, symbol, { detail: 'เปิดให้ดูเร็ว ๆ นี้' })).join('');
@@ -1095,11 +1103,11 @@ function childHubMarkup(child, s) {
       <h2>ดูข้อมูลลูก</h2><div class="child-tiles">${childTilesMarkup(child, data, s.read)}</div>
     </div></section>`;
 }
-function childSectionMarkup(child, section, data) {
+function childSectionMarkup(child, title, data) {
   const name = childShortName(child, data);
   return `<header class="child-section-header">
     <a class="button child-section-back" href="${childHref(child.student_id)}">${icon('back')}${escapeHtml(name ? `แฟ้มของ${name}` : 'แฟ้มลูก')}</a>
-    <h1 tabindex="-1">${childSections[section]}</h1><p>${escapeHtml(child.name)}</p>
+    <h1 tabindex="-1">${title}</h1><p>${escapeHtml(child.name)}</p>
   </header>`;
 }
 
@@ -1303,8 +1311,9 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
     } else if (route === 'child' || route === 'childSection') {
       const data = s.read.children[id];
       if (detailChildId !== id) { detailChildId = id; detailMonth = s.read.today.slice(0, 7); expandedSavings = false; }
-      const title = section ? `${childSections[section]} · ${child.name}` : child.name;
-      doc.title = `${title} — CRS MIS`;
+      const sectionTitle = section === 'profile' ? profileLabel(hasHealthData(loadedProfile(data?.profile))) : childSections[section];
+      const title = section ? `${sectionTitle} · ${child.name}` : child.name;
+      doc.title = section === 'profile' ? sectionTitle : `${title} — CRS MIS`;
       if (!section) {
         main.innerHTML = childHubMarkup(child, s);
       } else {
@@ -1322,7 +1331,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         } else {
           content = profileMarkup(data?.profile);
         }
-        main.innerHTML = `<section class="child-section">${childSectionMarkup(child, section, data)}<div class="child-section-content">${content}</div></section>`;
+        main.innerHTML = `<section class="child-section">${childSectionMarkup(child, sectionTitle, data)}<div class="child-section-content">${content}</div></section>`;
       }
       if (data && ['', 'profile', 'grades'].includes(section)) {
         void Promise.resolve().then(() => controller.loadChildPage(id, section));
