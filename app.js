@@ -193,6 +193,9 @@ export function schoolDaysMetadata(data) {
       (data.year_end != null && !validSchoolDate(data.year_end)) ||
       (data.year_start && data.year_end && data.year_end < data.year_start)) return null;
   return { year: data.year, year_start: data.year_start || null, year_end: data.year_end || null,
+    term1_end: validSchoolDate(data.term1_end) ? data.term1_end : null,
+    term2_start: validSchoolDate(data.term2_start) ? data.term2_start : null,
+    term2_end: validSchoolDate(data.term2_end) ? data.term2_end : null,
     holidays: data.holidays.filter(row => validSchoolDate(row?.date)).map(row => ({
       date: row.date, name: typeof row.name === 'string' ? row.name.trim() : '',
     })) };
@@ -200,6 +203,43 @@ export function schoolDaysMetadata(data) {
 export function schoolYearAttendance(rows, schoolDays) {
   return rows.filter(row => (!schoolDays?.year_start || row.attend_date >= schoolDays.year_start) &&
     (!schoolDays?.year_end || row.attend_date <= schoolDays.year_end));
+}
+
+export function attendanceTerms(schoolDays, today) {
+  const { year, year_start: start, term1_end: firstEnd, term2_start: secondStart } = schoolDays || {};
+  if (!year || !start || !firstEnd || !secondStart || today < start || firstEnd < start || secondStart <= firstEnd) return [];
+  const terms = [{ year, term: '1', start, end: firstEnd }];
+  if (today >= secondStart) terms.push({ year, term: '2', start: secondStart,
+    end: schoolDays.term2_end || schoolDays.year_end || today });
+  return terms;
+}
+
+function selectedAttendanceTerm(terms, data) {
+  return terms.find(term => academicTermKey(term) === data?.selected) || terms.at(-1);
+}
+
+const subjectAttendanceError = 'ยังแสดงเวลาเรียนรายวิชาไม่ได้ ลองใหม่';
+const attendanceRiskOrder = { retake: 0, critical: 1, warn: 2 };
+
+function subjectAttendanceResults(data, studentId, module) {
+  const { MS_WARN_PERCENT_SECONDARY, MS_MAKEUP_RATIO, MS_RETAKE_RATIO, computeAttendanceRisk } = module;
+  if (typeof computeAttendanceRisk !== 'function' ||
+      ![MS_WARN_PERCENT_SECONDARY, MS_MAKEUP_RATIO, MS_RETAKE_RATIO].every(value => Number.isFinite(value) && value > 0)) {
+    throw Error('Invalid attendance module');
+  }
+  const subjects = data.subjects.map(({ id, code, name, total_periods }) => {
+    const sessions = data.sessions.filter(row => row.subject_id === id).map(({ periods_covered, status }) => ({
+      periods_covered, attendance_records: status ? [{ student_id: studentId, status }] : [],
+    }));
+    const makeupHours = data.makeup.filter(row => row.subject_id === id).map(({ periods }) => ({ student_id: studentId, periods }));
+    const risk = computeAttendanceRisk(studentId, [{ subject: { total_periods }, sessions, makeupHours }], {});
+    const empty = !(Number(total_periods) > 0) ? 'ยังไม่ได้ตั้งจำนวนคาบ' : !sessions.length ? 'ยังไม่มีการเช็คชื่อ' : '';
+    return { code, name, totalPeriods: total_periods, empty, level: empty ? null : risk.level,
+      percent: risk.percent, rawMissed: risk.rawMissed, netMissed: risk.netMissed, makeupTotal: risk.makeupTotal };
+  });
+  subjects.sort((a, b) => (attendanceRiskOrder[a.level] ?? 3) - (attendanceRiskOrder[b.level] ?? 3) ||
+    String(a.code ?? '').localeCompare(String(b.code ?? ''), 'th'));
+  return { subjects, warn: MS_WARN_PERCENT_SECONDARY, makeup: MS_MAKEUP_RATIO * 100, retake: MS_RETAKE_RATIO * 100 };
 }
 
 // The same reset points as the session controller invalidate every S3 request.
@@ -227,6 +267,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       state.moneyLoading = true;
       for (const child of children) state.children[child.student_id] = { attendance: resource(), savings: resource(), payments: resource(), leaves: resource(),
         profile: { ...resource(), started: false, refreshing: false },
+        attendanceView: { secondary: isSecondary(child), selected: '', entries: new Map() },
         grades: { secondary: isSecondary(child), started: false, terms: resource(), selected: '', entries: new Map() } };
       changed();
     }
@@ -299,6 +340,9 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
           jobs.push(loadGradeTerms(child.student_id, { force: true }));
         }
         if (!section || section === 'profile') jobs.push(loadProfile(child.student_id, { quiet: true }));
+        if (attendance && target.attendanceView.secondary) jobs.push(schoolDays.then(() => {
+          if (version === ownVersion) return loadSubjectAttendance(child.student_id, { quiet: true, summary: !section });
+        }));
       }
     }
     await Promise.allSettled(jobs);
@@ -310,6 +354,48 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
     state.loading = false;
     if (notices.length) leavesChanged(notices);
     changed();
+  }
+  async function loadSubjectAttendance(studentId, { quiet = false, summary = false, force = false, key } = {}) {
+    const target = state.children[studentId]?.attendanceView;
+    if (!target) return;
+    const terms = attendanceTerms(state.schoolDays, state.today);
+    if (key !== undefined) {
+      if (!terms.some(term => academicTermKey(term) === key)) return;
+      target.selected = key;
+    }
+    if (!target.secondary) {
+      if (key !== undefined) changed();
+      return;
+    }
+    const term = summary ? terms.at(-1) : selectedAttendanceTerm(terms, target);
+    if (!term) return;
+    const termKey = academicTermKey(term), previous = target.entries.get(termKey);
+    if (previous?.loading || previous?.refreshing || (previous && !quiet && !force)) {
+      if (key !== undefined) changed();
+      return;
+    }
+    const retain = quiet && !!previous?.result;
+    const entry = { loading: !retain, refreshing: retain, error: '', result: retain ? previous.result : null };
+    target.entries.set(termKey, entry);
+    const ownVersion = version;
+    const current = () => version === ownVersion && target.entries.get(termKey) === entry;
+    if (!retain) changed();
+    try {
+      const { data, error } = await sb.rpc('child_subject_attendance', {
+        p_student_id: studentId, p_year: term.year, p_term: term.term,
+      });
+      if (!current()) return;
+      if (!error && data === null) entry.result = null;
+      if (error || !data || academicTermKey(data) !== termKey ||
+          ![data.subjects, data.sessions, data.makeup].every(Array.isArray)) throw Error('Invalid subject attendance');
+      if (!data.subjects.length) { entry.result = { subjects: [] }; return; }
+      const module = await loadGrades();
+      if (current()) entry.result = subjectAttendanceResults(data, studentId, module);
+    } catch {
+      if (current() && !entry.result) entry.error = subjectAttendanceError;
+    } finally {
+      if (current()) { entry.loading = false; entry.refreshing = false; changed(); }
+    }
   }
   async function loadProfile(studentId, { force = false, quiet = false } = {}) {
     const profile = state.children[studentId]?.profile;
@@ -355,7 +441,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
   }
   async function selectGradeTerm(studentId, key) {
     const grades = state.children[studentId]?.grades;
-    const term = grades?.terms.rows.find(row => gradeTermKey(row) === key);
+    const term = grades?.terms.rows.find(row => academicTermKey(row) === key);
     if (!grades?.secondary || !term) return;
     grades.selected = key;
     // คงชิปและโฟกัสระหว่างรีเฟรช แล้วโหลดภาคล่าสุดที่ผู้ใช้เลือก
@@ -363,7 +449,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
     return loadGradeEntry(studentId, grades, term);
   }
   async function loadGradeEntry(studentId, grades, term) {
-    const key = gradeTermKey(term);
+    const key = academicTermKey(term);
     const entry = { loading: true, error: '', released: false, release_date: term.release_date };
     grades.entries.set(key, entry);
     const ownVersion = version;
@@ -416,7 +502,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       if (error || !Array.isArray(data) || data.some(row => !row || !row.year || !row.term ||
           typeof row.released !== 'boolean' || !validSchoolDate(row.release_date))) throw Error('Invalid terms');
       grades.terms.rows = data.slice().sort((a, b) => Number(b.year) - Number(a.year) || Number(b.term) - Number(a.term));
-      if (!data.some(row => gradeTermKey(row) === grades.selected)) grades.selected = grades.terms.rows[0] ? gradeTermKey(grades.terms.rows[0]) : '';
+      if (!data.some(row => academicTermKey(row) === grades.selected)) grades.selected = grades.terms.rows[0] ? academicTermKey(grades.terms.rows[0]) : '';
       grades.terms.loading = false;
       if (summary) await loadGradeSummary(studentId);
       else if (grades.selected) await selectGradeTerm(studentId, grades.selected);
@@ -436,13 +522,13 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
     if (!grades.started) return loadGradeTerms(studentId, { summary: true });
     if (grades.terms.loading || grades.terms.error) return;
     const term = latestReleasedTerm(grades);
-    if (term && !grades.entries.has(gradeTermKey(term))) return loadGradeEntry(studentId, grades, term);
+    if (term && !grades.entries.has(academicTermKey(term))) return loadGradeEntry(studentId, grades, term);
   }
-  return { state, load, reset, loadLeaves, loadProfile, loadGrades: loadGradeTerms, loadGradeSummary, selectGradeTerm };
+  return { state, load, reset, loadLeaves, loadProfile, loadSubjectAttendance, loadGrades: loadGradeTerms, loadGradeSummary, selectGradeTerm };
 }
 
 function isSecondary(child) { return /^ม\./.test(child?.grade_level || ''); }
-function gradeTermKey(term) { return `${term.year}/${term.term}`; }
+function academicTermKey(term) { return `${term.year}/${term.term}`; }
 function latestReleasedTerm(grades) { return grades?.terms.rows.find(term => term.released === true); }
 
 export function gradesMarkup(child, grades) {
@@ -454,9 +540,9 @@ export function gradesMarkup(child, grades) {
   if (grades.terms.error) return retry(grades.terms.error);
   if (!grades.terms.rows.length) return '<p class="data-status">ยังไม่มีการประกาศผลการเรียน</p>';
   const chips = `<div class="grade-terms" role="group" aria-label="เลือกภาคเรียน">${grades.terms.rows.map((row, index) =>
-    `<button id="grade-term-${index}" class="filter-chip" data-grade-term="${escapeHtml(gradeTermKey(row))}" aria-pressed="${grades.selected === gradeTermKey(row)}">${escapeHtml(row.term)}/${escapeHtml(row.year)}</button>`).join('')}</div>`;
+    `<button id="grade-term-${index}" class="filter-chip" data-grade-term="${escapeHtml(academicTermKey(row))}" aria-pressed="${grades.selected === academicTermKey(row)}">${escapeHtml(row.term)}/${escapeHtml(row.year)}</button>`).join('')}</div>`;
   if (grades.terms.loading) return chips + loading;
-  const entry = grades.entries.get(grades.selected), term = grades.terms.rows.find(row => gradeTermKey(row) === grades.selected);
+  const entry = grades.entries.get(grades.selected), term = grades.terms.rows.find(row => academicTermKey(row) === grades.selected);
   if (!entry || entry.loading) return chips + loading;
   if (entry.error) return chips + retry(entry.error);
   if (!entry.released) return chips + `<p class="data-status">${validSchoolDate(entry.release_date)
@@ -652,24 +738,60 @@ export function yearAttendance(rows, schoolDays, today) {
   return total ? { present, total, percent: Math.round(present * 100 / total), absent: counts.ขาด,
     leave: counts.ลา, late: counts.มาสาย, year: schoolDays.year } : null;
 }
-function attendanceStats(data, read) {
-  return data && !data.loading && !data.error ? yearAttendance(data.rows, read.schoolDays, read.today) : null;
+function attendanceStats(data, read, term) {
+  const dates = term ? { year: term.year, year_start: term.start, year_end: term.end } : read.schoolDays;
+  return data && !data.loading && !data.error ? yearAttendance(data.rows, dates, read.today) : null;
 }
 function schoolYearLabel(year) { return year ? `ปีการศึกษา ${year}` : ''; }
-export function attendanceSummaryMarkup(data, read) {
+export function attendanceTermChips(terms, selected) {
+  if (!selected) return '';
+  return `<div class="grade-terms attendance-terms" role="group" aria-label="เลือกภาคเรียน">${terms.map(term =>
+    `<button id="attendance-term-${term.term}" class="filter-chip" type="button" data-attendance-term="${escapeHtml(academicTermKey(term))}" aria-pressed="${term === selected}">ภาค ${term.term}</button>`).join('')}</div>`;
+}
+export function attendanceSummaryMarkup(data, read, term) {
   const status = resourceMarkup(data);
-  const stats = attendanceStats(data, read);
-  return `<section class="data-card attendance-summary" aria-label="สรุปการมาเรียนปีการศึกษานี้">${status ||
-    (!stats ? '<p class="data-status">ยังไม่มีข้อมูลการมาเรียนปีการศึกษานี้</p>' : `<div class="attendance-overview">
+  const stats = attendanceStats(data, read, term);
+  const period = term ? `ภาคเรียนที่ ${term.term}/${term.year}` : schoolYearLabel(stats?.year);
+  return `<section class="data-card attendance-summary" aria-label="สรุปการมาเรียน${term ? escapeHtml(period) : 'ปีการศึกษานี้'}">${status ||
+    (!stats ? `<p class="data-status">ยังไม่มีข้อมูลการมาเรียน${term ? escapeHtml(period) : 'ปีการศึกษานี้'}</p>` : `<div class="attendance-overview">
       <svg class="attendance-ring" viewBox="0 0 100 100" role="img" aria-label="มาเรียน ${stats.percent} เปอร์เซ็นต์">
         <circle cx="50" cy="50" r="43" fill="none" stroke="var(--line)" stroke-width="8"/>
         <circle cx="50" cy="50" r="43" fill="none" stroke="var(--teal)" stroke-width="8" pathLength="100"
           stroke-dasharray="${stats.percent} 100" transform="rotate(-90 50 50)"/>
         <text x="50" y="51" dominant-baseline="middle" text-anchor="middle">${stats.percent}%</text>
       </svg><div><p><strong>มา ${stats.present} จาก ${stats.total} วันที่ครูเช็ค</strong></p>
-        <p class="muted">${escapeHtml(schoolYearLabel(stats.year))}</p>
+        <p class="muted">${escapeHtml(period)}</p>
         <ul class="attendance-counts"><li class="absent">ขาด ${stats.absent}</li><li class="leave">ลา ${stats.leave}</li><li class="late">สาย ${stats.late}</li></ul>
       </div></div>`)}</section>`;
+}
+export function subjectAttendanceMarkup(child, term, data) {
+  if (!isSecondary(child)) return '';
+  const entry = term && data?.attendanceView?.entries.get(academicTermKey(term));
+  const loading = term ? !entry || entry.loading : !data || data.attendance.loading;
+  let content;
+  if (loading) content = `<p class="data-status" role="status">${busyIcon()}กำลังโหลดเวลาเรียนรายวิชา…</p>`;
+  else if (!term) content = '<p class="data-status">ยังไม่มีข้อมูลภาคเรียนสำหรับแสดงเวลาเรียนรายวิชา</p>';
+  else if (entry.error) content = `<p class="field-error" role="alert">${escapeHtml(entry.error)}</p><button id="retry-subject-attendance" class="button quiet" type="button">ลองใหม่</button>`;
+  else if (!entry.result.subjects.length) content = '<p class="data-status">ยังไม่มีรายวิชาในภาคนี้</p>';
+  else {
+    const { subjects, warn, makeup, retake } = entry.result;
+    const labels = { warn: 'ใกล้เกณฑ์', critical: 'เกินเกณฑ์ · ติดต่อครูประจำวิชา', retake: `ขาดเกิน ${retake}% · ติดต่อครูประจำวิชา` };
+    content = `<p class="helper subject-attendance-hint">คิดจากคาบทั้งภาค · ลาคิดครึ่งคาบ · ขาดเกิน ${makeup}% ต้องเรียนชดเชย</p>
+      <ul class="subject-attendance-list">${subjects.map(subject => {
+        const tone = subject.level === 'warn' ? 'amber' : subject.level ? 'danger' : '';
+        const retake = subject.level === 'retake';
+        const missed = retake ? subject.rawMissed : subject.netMissed;
+        const countLabel = retake && subject.makeupTotal ? 'ขาดก่อนชดเชย' : 'ขาด';
+        return `<li><div class="subject-attendance-header"><h3>${escapeHtml(subject.name)}</h3>
+          ${subject.empty ? '' : `<strong>${subject.percent ? `ขาด ${subject.percent.toFixed(1)}%` : 'ไม่ขาด'}</strong>`}</div>
+          ${subject.code ? `<p class="helper subject-attendance-code">${escapeHtml(subject.code)}</p>` : ''}
+          ${subject.empty ? `<p class="helper">${subject.empty}</p>` : `
+            <div class="subject-meter ${tone}" aria-hidden="true" style="--meter-fill:${Math.min(100, subject.percent / makeup * 100)}%;--meter-warn:${warn / makeup * 100}%"><span></span></div>
+            <p class="helper">${countLabel} ${missed} คาบ จาก ${escapeHtml(subject.totalPeriods)} คาบ${subject.makeupTotal ? ` · ชดเชยแล้ว ${subject.makeupTotal} คาบ` : ''}</p>
+            ${tone ? `<p class="subject-risk ${tone}">${labels[subject.level]}</p>` : ''}`}</li>`;
+      }).join('')}</ul>`;
+  }
+  return `<section class="data-card subject-attendance" aria-labelledby="subject-attendance-heading"><h2 id="subject-attendance-heading" tabindex="-1">เวลาเรียนรายวิชา</h2>${content}</section>`;
 }
 export function childTodayMarkup(data, read) {
   const row = data?.rows.find(item => item.attend_date === read.today);
@@ -694,19 +816,31 @@ export function childTodayMarkup(data, read) {
   return `<p class="child-today ${tone}" role="status">${icon(symbol)}<span>${escapeHtml(label)}</span></p>`;
 }
 
-function childTile(label, symbol, { href, value, detail, busy = false, warning = false } = {}) {
+function childTile(label, symbol, { href, value, detail, busy = false, warning = false, note = '' } = {}) {
   const content = `<span class="tile-icon">${icon(symbol)}</span><strong class="tile-label">${label}</strong>
     ${value ? `<strong class="tile-value">${escapeHtml(value)}</strong>` : ''}
     ${busy ? `<span class="tile-detail">${busyIcon()}กำลังโหลด…</span>`
-      : `<span class="tile-detail${warning ? ' tile-warning' : ''}">${warning ? icon('alert') : ''}${escapeHtml(detail)}</span>`}`;
+      : `<span class="tile-detail${warning ? ' tile-warning' : ''}">${warning ? icon('alert') : ''}${escapeHtml(detail)}</span>`}${note}`;
   return href ? `<a class="child-tile" href="${href}">${content}</a>`
     : `<div class="child-tile tile-upcoming">${content}</div>`;
 }
+function attendanceTileNote(entry) {
+  const subjects = entry?.result?.subjects || [];
+  const danger = subjects.filter(subject => subject.level === 'retake' || subject.level === 'critical').length;
+  const warn = danger ? 0 : subjects.filter(subject => subject.level === 'warn').length;
+  const label = (severe, count) => `<span>${severe ? 'เกินเกณฑ์' : 'ใกล้เกณฑ์'} มส. ${count} วิชา</span>`;
+  // Measure both warning labels before loading so Thai wrapping at high zoom cannot move the tiles.
+  const space = [true, false].map(severe => `<span class="tile-warning-size" aria-hidden="true">${icon('alert')}${label(severe, 99)}</span>`).join('');
+  return `<span class="attendance-tile-note">${space}${danger || warn
+    ? `<span class="tile-warning${danger ? ' danger' : ''}">${icon('alert')}${label(danger, danger || warn)}</span>` : ''}</span>`;
+}
 export function childTilesMarkup(child, data, read) {
-  const link = childHref(child.student_id), stats = attendanceStats(data?.attendance, read);
+  const currentTerm = attendanceTerms(read.schoolDays, read.today).at(-1);
+  const link = childHref(child.student_id), stats = attendanceStats(data?.attendance, read, currentTerm);
   const secondary = isSecondary(child);
+  const subjectEntry = currentTerm && data?.attendanceView?.entries.get(academicTermKey(currentTerm));
   const grades = data?.grades, term = secondary ? latestReleasedTerm(grades) : null;
-  const entry = term && grades.entries.get(gradeTermKey(term));
+  const entry = term && grades.entries.get(academicTermKey(term));
   const gradeBusy = secondary && (!grades || grades.terms.loading || !!term && (!entry || entry.loading));
   const gpa = entry?.released && !entry.gpa.pending && Number.isFinite(entry.gpa.gpa) ? entry.gpa.gpa.toFixed(2) : '';
   const balance = savingsBalance(data?.savings, read.money);
@@ -716,8 +850,9 @@ export function childTilesMarkup(child, data, read) {
   const bloodType = profileText(profile?.blood_type), studentNo = profileText(profile?.student_no);
   return childTile(childSections.attendance, 'attendance', {
     href: link + '/attendance', value: stats && `${stats.percent}%`, busy: !data || data.attendance.loading,
-    detail: stats ? [schoolYearLabel(stats.year), `ขาด ${stats.absent} ลา ${stats.leave} สาย ${stats.late}`].filter(Boolean).join(' · ')
+    detail: stats ? [currentTerm ? `ภาค ${currentTerm.term}/${currentTerm.year}` : schoolYearLabel(stats.year), `ขาด ${stats.absent} ลา ${stats.leave} สาย ${stats.late}`].filter(Boolean).join(' · ')
       : data?.attendance.error ? 'ยังแสดงข้อมูลไม่ได้' : 'ยังไม่มีข้อมูล',
+    note: secondary && currentTerm ? attendanceTileNote(subjectEntry) : '',
   }) + childTile(childSections.grades, 'book', {
     href: link + '/grades', value: gpa, busy: gradeBusy,
     detail: !secondary ? 'เปิดให้ดูเร็ว ๆ นี้' : grades?.terms.error || entry?.error ? 'ยังแสดงผลการเรียนไม่ได้'
@@ -958,7 +1093,8 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
     if (route !== 'child' && route !== 'childSection') return;
     const location = childLocation(hash());
     if (location.id !== id || location.section !== section || !ownsChild(id)) return;
-    if (!section) return Promise.all([reads.loadProfile(id), reads.loadGradeSummary(id)]);
+    if (!section) return Promise.all([reads.loadProfile(id), reads.loadGradeSummary(id), reads.loadSubjectAttendance(id, { summary: true })]);
+    if (section === 'attendance') return reads.loadSubjectAttendance(id);
     if (section === 'profile') return reads.loadProfile(id);
     if (section === 'grades') {
       const grades = state.read.children[id]?.grades;
@@ -974,6 +1110,8 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
     discardLeave() { resetLeave(); },
     loadLeaves(id) { if (ownsChild(id)) return reads.loadLeaves(id); },
     retryProfile(id) { if (ownsChild(id)) return reads.loadProfile(id, { force: true }); },
+    selectAttendanceTerm(id, key) { if (ownsChild(id)) return reads.loadSubjectAttendance(id, { key }); },
+    retrySubjectAttendance(id) { if (ownsChild(id)) return reads.loadSubjectAttendance(id, { force: true }); },
     loadGrades(id, options) { if (ownsChild(id)) return reads.loadGrades(id, options); },
     selectGradeTerm(id, key) { if (ownsChild(id)) return reads.selectGradeTerm(id, key); },
     loadData() { if (state.session && !state.signoutBusy && state.loaded) { resetLeave(); return reads.load(state.children); } },
@@ -1017,6 +1155,7 @@ const icons = {
   wallet: '<rect x="2" y="6" width="20" height="14" rx="3"/><path d="M2 10h20M16 15h2"/>',
   bell: '<path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10 21h4"/>',
   home: '<path d="m3 11 9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
+  backpack: '<rect x="5" y="6" width="14" height="15" rx="3"/><path d="M9 6V5a3 3 0 0 1 6 0v1M5 13h14m-7 0v2"/>',
   account: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/>',
   phone: '<rect x="6" y="2" width="12" height="20" rx="3"/><path d="M11 18h2"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v5h1"/>',
@@ -1061,7 +1200,7 @@ export function thaiToday(date = new Date()) {
 
 export function bottomNavigation(route, childId) {
   const active = ['childSection', 'leave'].includes(route) ? 'child' : route;
-  return [['home', '#home', 'วันนี้', 'home'], ['child', childHref(childId), 'ลูก', 'user'],
+  return [['home', '#home', 'วันนี้', 'home'], ['child', childHref(childId), 'ลูก', 'backpack'],
     ['calendar', '#calendar', 'ปฏิทิน', 'calendar'], ['account', '#account', 'บัญชี', 'account']]
     .map(([page, href, label, symbol]) => `<a href="${href}"${page === active ? ' aria-current="page"' : ''}><span class="nav-icon">${icon(symbol)}</span><span>${label}</span></a>`).join('');
 }
@@ -1313,16 +1452,19 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
       if (detailChildId !== id) { detailChildId = id; detailMonth = s.read.today.slice(0, 7); expandedSavings = false; }
       const sectionTitle = section === 'profile' ? profileLabel(hasHealthData(loadedProfile(data?.profile))) : childSections[section];
       const title = section ? `${sectionTitle} · ${child.name}` : child.name;
-      doc.title = section === 'profile' ? sectionTitle : `${title} — CRS MIS`;
+      doc.title = `${title} — CRS MIS`;
       if (!section) {
         main.innerHTML = childHubMarkup(child, s);
       } else {
         let content;
         if (section === 'attendance') {
-          content = `${attendanceSummaryMarkup(data?.attendance, s.read)}
+          const terms = attendanceTerms(s.read.schoolDays, s.read.today);
+          const term = selectedAttendanceTerm(terms, data?.attendanceView);
+          content = `${attendanceTermChips(terms, term)}${attendanceSummaryMarkup(data?.attendance, s.read, term)}
             ${data && !data.attendance.loading && !data.attendance.error
               ? `<section class="data-card"><h2>ปฏิทินการมาเรียน</h2>${attendanceMarkup(data.attendance.rows, detailMonth, s.read.today, s.read.schoolDays)}</section>` : ''}
-            <section class="data-card" aria-busy="${!data || data.leaves.loading || !!s.cancelBusyId}"><h2 id="leave-heading" tabindex="-1">ใบลา</h2><a class="button primary full" href="#leave/${encodeURIComponent(id)}">ยื่นใบลา</a>${leaveListMarkup(data?.leaves, s.cancelBusyId)}<p class="field-error" role="alert">${escapeHtml(s.cancelError)}</p><button type="button" id="reload-leaves" class="button secondary">โหลดรายการใบลาอีกครั้ง</button></section>`;
+            <section class="data-card" aria-busy="${!data || data.leaves.loading || !!s.cancelBusyId}"><h2 id="leave-heading" tabindex="-1">ใบลา</h2><a class="button primary full" href="#leave/${encodeURIComponent(id)}">ยื่นใบลา</a>${leaveListMarkup(data?.leaves, s.cancelBusyId)}<p class="field-error" role="alert">${escapeHtml(s.cancelError)}</p><button type="button" id="reload-leaves" class="button secondary">โหลดรายการใบลาอีกครั้ง</button></section>
+            ${subjectAttendanceMarkup(child, term, data)}`;
         } else if (section === 'grades') {
           content = `<section class="data-card" aria-label="ผลการเรียน" aria-busy="${isSecondary(child) && (!data || data.grades.terms.loading || !!data.grades.entries.get(data.grades.selected)?.loading)}">${gradesMarkup(child, data?.grades)}</section>`;
         } else if (section === 'money') {
@@ -1333,10 +1475,14 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         }
         main.innerHTML = `<section class="child-section">${childSectionMarkup(child, sectionTitle, data)}<div class="child-section-content">${content}</div></section>`;
       }
-      if (data && ['', 'profile', 'grades'].includes(section)) {
+      if (data && ['', 'profile', 'grades', 'attendance'].includes(section)) {
         void Promise.resolve().then(() => controller.loadChildPage(id, section));
       }
       main.querySelector('#retry-profile')?.addEventListener('click', () => { void controller.retryProfile(id); });
+      main.querySelectorAll('[data-attendance-term]').forEach(button => button.addEventListener('click', () => {
+        void controller.selectAttendanceTerm(id, button.dataset.attendanceTerm);
+      }));
+      main.querySelector('#retry-subject-attendance')?.addEventListener('click', () => { void controller.retrySubjectAttendance(id); });
       main.querySelectorAll('[data-grade-term]').forEach(button => button.addEventListener('click', () => {
         void controller.selectGradeTerm(id, button.dataset.gradeTerm);
       }));
@@ -1425,6 +1571,8 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         if (selection) target.setSelectionRange(...selection);
       } else if (activeId === 'previous-month' || activeId === 'next-month') {
         main.querySelector('.month-controls h3')?.focus({ preventScroll: true });
+      } else if (activeId === 'retry-subject-attendance') {
+        main.querySelector('#subject-attendance-heading')?.focus({ preventScroll: true });
       }
     }
   }
