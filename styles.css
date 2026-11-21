@@ -201,6 +201,20 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 .grade-terms .filter-chip { min-width: 44px; min-height: 44px; white-space: normal; overflow-wrap: anywhere; color: var(--ink); background: var(--bg); border: 1px solid var(--line); }
 .grade-terms .filter-chip[aria-pressed="true"] { color: var(--teal); background: var(--teal-soft); border-color: var(--teal); box-shadow: none; }
 .grade-terms .filter-chip:focus-visible { outline-color: var(--teal); }
+.development-comment { color: var(--ink); background: var(--blue-soft); }
+.development-byline { color: var(--blue); font-size: .875rem; }
+.development-message { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.development-rows { list-style: none; margin: 0; padding: 0; }
+.development-rows li {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+  padding-block: 10px; border-top: 1px solid var(--line);
+}
+.development-name { flex: 1 1 8rem; min-inline-size: 0; overflow-wrap: anywhere; }
+.development-rows .helper { flex-basis: 100%; margin: 0; }
+.development-result { padding: 2px 8px; border-radius: 8px; font-size: .875rem; overflow-wrap: anywhere; }
+.development-result.positive { color: var(--teal); background: var(--teal-soft); }
+.development-result.danger { color: var(--danger); background: var(--danger-soft); }
+.development-result.neutral { color: var(--muted); background: var(--bg); }
 .grade-average { margin-block: 20px; font-variant-numeric: tabular-nums; }
 .grade-average h2 { color: var(--muted); font-size: 1rem; }
 .grade-average > strong { font-size: 2rem; color: var(--teal); }
@@ -277,6 +291,13 @@ a.child-tile:active, .hub-children a:active { opacity: .78; }
 .attendance-tile-note > span { grid-area: 1 / 1; align-self: start; justify-self: start; min-inline-size: 0; max-inline-size: 100%; }
 .tile-warning-size { visibility: hidden; }
 .attendance-tile-note svg { flex: none; }
+.development-tile-slot {
+  display: grid; align-self: stretch;
+  font-size: .8125rem; line-height: 1.45; font-variant-numeric: tabular-nums;
+}
+.development-tile-slot > span { grid-area: 1 / 1; align-self: start; justify-self: start; min-inline-size: 0; max-inline-size: 100%; }
+.development-tile-slot svg { flex: none; }
+.tile-placeholder { visibility: hidden; }
 .tile-warning.danger, .subject-risk.danger { color: var(--danger); background: var(--danger-soft); }
 .tile-upcoming { border-style: dashed; background: var(--bg); color: var(--muted); }
 .tile-upcoming .tile-icon { color: var(--muted); background: var(--white); }
