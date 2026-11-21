@@ -230,6 +230,22 @@ input[aria-invalid="true"] { border-color: var(--danger); }
   border-radius: 8px; background: var(--line); color: var(--ink); font-size: .875rem; overflow-wrap: anywhere;
 }
 .timetable-note { margin-top: 12px; overflow-wrap: anywhere; }
+.transport-balance { font-variant-numeric: tabular-nums; }
+.transport-amount {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin: 0; font-size: 1.75rem; font-weight: 700; line-height: 1.35; color: var(--teal);
+}
+.transport-amount.is-due { color: var(--amber); }
+.transport-amount svg { flex: 0 0 1.25rem; width: 1.25rem; height: 1.25rem; }
+.transport-amount + p:not(.helper) { margin: 4px 0 0; }
+.transport-list { list-style: none; margin: 0; padding: 0; font-variant-numeric: tabular-nums; }
+.transport-list li { padding-block: 10px; border-top: 1px solid var(--line); }
+.transport-list li:last-child { padding-bottom: 0; }
+.transport-list :is(p, h3) { margin: 0; }
+.transport-list li > :is(h3, .transport-line) + * { margin-top: 4px; }
+.transport-line { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 12px; overflow-wrap: anywhere; }
+.transport-line > * { min-width: 0; }
+.transport-note { margin-top: 12px; }
 .development-comment { color: var(--ink); background: var(--blue-soft); }
 .development-byline { color: var(--blue); font-size: .875rem; }
 .development-message { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
@@ -360,6 +376,7 @@ a.child-tile:active, .hub-children a:active { opacity: .78; }
 .tile-warning.danger, .subject-risk.danger { color: var(--danger); background: var(--danger-soft); }
 .tile-upcoming { border-style: dashed; background: var(--bg); color: var(--muted); }
 .tile-upcoming .tile-icon { color: var(--muted); background: var(--white); }
+.transport-tile.tile-upcoming .tile-value { color: var(--muted); }
 .child-section-header h1 { margin: 4px 0; }
 .child-section-header > p { font-size: .9375rem; overflow-wrap: anywhere; }
 .child-section-back.button { min-height: 44px; padding: 6px 8px; margin-inline-start: -8px; color: var(--white); }

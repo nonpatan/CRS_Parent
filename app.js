@@ -4,7 +4,7 @@ export const CLIENT_OPTIONS = { auth: {
   storageKey: 'crs-parent-auth', flowType: 'pkce', detectSessionInUrl: true, persistSession: true,
 } };
 export const INSTALL_DISMISSED_KEY = 'crs-parent-install-dismissed';
-export const MONEY_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/money.js';
+export const MONEY_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/money.js?v=20261121-1';
 export const GRADES_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/grades.js?v=20261121-1';
 export const REPORT_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/report-card.js?v=20261121-2';
 
@@ -28,6 +28,7 @@ const childSections = {
   timetable: 'ตารางเรียน',
   money: 'เงินออม · การชำระ',
   profile: 'ข้อมูลประจำตัว',
+  transport: 'รถรับส่ง',
 };
 
 function childLocation(hash) {
@@ -256,9 +257,13 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
   loadReport = () => import(REPORT_MODULE_URL) } = {}) {
   const state = { children: {}, feed: resource(), calendar: resource(), schoolDays: null,
     money: null, moneyLoading: false, today: bangkokDate(now()), loading: false, loadedAt: {} };
-  let version = 0, schoolDaysPending, schoolDaysThrough = '';
+  let version = 0, moneyPending, schoolDaysPending, schoolDaysThrough = '';
   const revisions = new WeakMap();
   const termRequests = new WeakMap();
+  function sharedMoney() {
+    moneyPending ??= Promise.resolve().then(loadMoney).finally(() => { moneyPending = undefined; });
+    return moneyPending;
+  }
   function reset() {
     version++;
     state.children = {}; state.feed = resource(); state.calendar = resource();
@@ -277,6 +282,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       for (const child of children) state.children[child.student_id] = { attendance: resource(), savings: resource(), payments: resource(), leaves: resource(),
         profile: { ...resource(), started: false, refreshing: false },
         timetable: { loading: true, pending: false, date: '', error: '', result: undefined },
+        transport: { loading: true, pending: false, error: '', result: undefined },
         attendanceView: { secondary: isSecondary(child), selected: '', entries: new Map() },
         grades: hasAcademicReports(child) ? { primary: isPrimary(child), started: false, terms: resource(),
           selected: '', entries: new Map() } : null,
@@ -314,7 +320,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
     const finance = page !== 'calendar' && (!section || section === 'money');
     const money = finance && (!quiet || !state.money) ? (async () => {
       try {
-        const module = await loadMoney();
+        const module = await sharedMoney();
         if (version === ownVersion && typeof module.computeSavingsBalance === 'function') state.money = module.computeSavingsBalance;
       } catch { /* Keep raw transactions visible; never substitute a local formula. */ }
       finally { if (version === ownVersion) { state.moneyLoading = false; changed(); } }
@@ -355,6 +361,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       if (finance && page !== 'home') jobs.push(fetchRows(target.payments, 'child_payments', { ...args, p_limit: 50 }));
       if (quiet && page === 'child') {
         if (timetable) jobs.push(loadTimetable(child.student_id, { quiet: true }));
+        if (!section || section === 'transport') jobs.push(loadTransport(child.student_id, { quiet: true }));
         const refreshGrades = target.grades?.started && (!section || section === 'grades');
         if (refreshGrades) {
           jobs.push(loadGradeTerms(child.student_id, { force: true }));
@@ -444,6 +451,45 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
         profile.loading = false; profile.refreshing = false;
         state.loadedAt[`child/${studentId}/profile`] = now().getTime();
         changed();
+      }
+    }
+  }
+  async function loadTransport(studentId, { force = false, quiet = false } = {}) {
+    const target = state.children[studentId]?.transport;
+    if (!target || target.pending || (!target.loading && !quiet && !force)) return;
+    const ownVersion = version;
+    target.pending = true;
+    if (!quiet) { target.loading = true; target.error = ''; changed(); }
+    try {
+      const { data, error } = await sb.rpc('child_transport', { p_student_id: studentId });
+      if (version !== ownVersion) return;
+      if (error) throw error;
+      if (data === null) {
+        target.result = null;
+      } else {
+        if (![data?.periods, data?.attendance, data?.overrides, data?.month_rates, data?.payments].every(Array.isArray)) {
+          throw Error('Invalid transport data');
+        }
+        const { periods, attendance, overrides, month_rates: monthRates, opening_debt: openingDebt, payments, from, to } = data;
+        if (!periods.length && !(Number(openingDebt) > 0) && !payments.length) {
+          target.result = { periods };
+        } else {
+          if (!validSchoolDate(from) || !validSchoolDate(to) || from > to) throw Error('Invalid transport dates');
+          const { computeTransportCharges, computeTransportOutstanding } = await sharedMoney();
+          if (version !== ownVersion) return;
+          const charges = computeTransportCharges({ periods, attendance, overrides, monthRates, openingDebt, from, to });
+          const outstanding = computeTransportOutstanding(charges, payments);
+          if (!Number.isFinite(outstanding)) throw Error('Invalid outstanding transport balance');
+          target.result = transportSummary(periods, charges, outstanding, payments, to);
+        }
+      }
+      target.error = '';
+    } catch {
+      if (version === ownVersion && (!quiet || target.result === undefined)) target.error = transportError;
+    } finally {
+      if (version === ownVersion) {
+        state.loadedAt[`child/${studentId}/transport`] = now().getTime();
+        target.loading = false; target.pending = false; changed();
       }
     }
   }
@@ -720,7 +766,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       }
     }
   }
-  return { state, load, reset, loadLeaves, loadProfile, loadTimetable, loadSubjectAttendance, loadGrades: loadGradeTerms,
+  return { state, load, reset, loadLeaves, loadProfile, loadTimetable, loadTransport, loadSubjectAttendance, loadGrades: loadGradeTerms,
     loadGradeSummary, selectGradeTerm, loadDevelopment };
 }
 
@@ -1316,13 +1362,98 @@ export function timetableMarkup(entry, selected, now = new Date()) {
 }
 
 function childTile(label, symbol, { href, value, detail, busy = false, warning = false, extra = '', className = '' } = {}) {
+  const classes = `child-tile${className ? ' ' + className : ''}`;
   const content = `<span class="tile-icon">${icon(symbol)}</span><strong class="tile-label">${label}</strong>
     ${value ? `<strong class="tile-value">${escapeHtml(value)}</strong>` : ''}
     ${busy ? `<span class="tile-detail">${busyIcon()}กำลังโหลด…</span>`
       : detail === undefined ? '' : `<span class="tile-detail${warning ? ' tile-warning' : ''}">${warning ? icon('alert') : ''}${escapeHtml(detail)}</span>`}${extra}`;
-  return href ? `<a class="child-tile${className ? ' ' + className : ''}" href="${href}">${content}</a>`
-    : `<div class="child-tile tile-upcoming">${content}</div>`;
+  return href ? `<a class="${classes}" href="${href}">${content}</a>`
+    : `<div class="${classes} tile-upcoming">${content}</div>`;
 }
+const transportError = 'โหลดข้อมูลรถรับส่งไม่สำเร็จ ตรวจอินเทอร์เน็ตแล้วลองใหม่';
+const transportNoService = 'ไม่ได้ใช้รถรับส่งของโรงเรียน';
+const transportUnannounced = 'ยังไม่ประกาศยอด';
+const transportDue = 'ค่ารถค้างชำระ';
+
+function transportSummary(periods, charges, outstanding, payments, to) {
+  const active = period => period.start_date <= to && (!period.end_date || period.end_date >= to);
+  const orderedPeriods = periods.slice().sort((a, b) => Number(active(b)) - Number(active(a)) || b.start_date.localeCompare(a.start_date));
+  const months = new Map();
+  function monthFor(date) {
+    const ym = `${date.slice(0, 7)}-01`;
+    if (!months.has(ym)) months.set(ym, { ym, monthly: null, unannounced: false, daily: null, rides: 0 });
+    return months.get(ym);
+  }
+  // Group the amounts already computed by the shared module for display.
+  for (const { ym, amount, announced } of charges.months) {
+    const month = monthFor(ym);
+    if (announced) month.monthly = (month.monthly ?? 0) + amount;
+    else month.unannounced = true;
+  }
+  for (const { date, amount } of charges.days) {
+    const month = monthFor(date);
+    month.daily = (month.daily ?? 0) + amount;
+    if (amount > 0) month.rides++;
+  }
+  return { periods: orderedPeriods, to, outstanding, openingDebt: charges.openingDebt,
+    months: [...months.values()].sort((a, b) => b.ym.localeCompare(a.ym)),
+    unannouncedMonths: charges.unannouncedMonths,
+    payments: payments.slice().sort((a, b) => b.pay_date.localeCompare(a.pay_date)) };
+}
+function transportMonth(ym, withYear = true) {
+  return thaiDate(ym, { day: undefined, year: withYear ? 'numeric' : undefined });
+}
+
+function transportTile(entry, href) {
+  const options = { href, className: 'transport-tile' };
+  const result = entry?.result;
+  if (!entry || entry.loading) options.busy = true;
+  else if (entry.error || !result) options.detail = 'ยังแสดงยอดไม่ได้';
+  else if (!result.periods.length) return childTile(childSections.transport, 'bus', { className: options.className, value: '—', detail: transportNoService });
+  else {
+    const { periods, outstanding, unannouncedMonths, to } = result;
+    const period = periods.find(row => row.start_date <= to) || periods.at(-1);
+    options.warning = outstanding > 0;
+    options.value = options.warning ? baht(outstanding) : 'ไม่มียอดค้าง';
+    options.detail = options.warning ? transportDue : [period.zone_name, period.billing_mode].filter(Boolean).join(' · ');
+    if (unannouncedMonths.length) {
+      const withYear = new Set(unannouncedMonths.map(ym => ym.slice(0, 4))).size > 1;
+      const months = unannouncedMonths.map(ym => transportMonth(ym, withYear)).join(', ');
+      const note = `+ ${transportUnannounced} ${months}`;
+      if (options.warning) options.extra = `<span class="tile-detail">${escapeHtml(note)}</span>`;
+      else options.detail = note;
+    }
+  }
+  return childTile(childSections.transport, 'bus', options);
+}
+
+export function transportMarkup(entry) {
+  if (!entry || entry.loading) return `<section class="data-card"><p class="muted" role="status">${busyIcon()}กำลังโหลดข้อมูลรถรับส่ง…</p></section>`;
+  if (entry.error) return `<section class="data-card"><p class="field-error" role="alert">${escapeHtml(entry.error)}</p><button id="retry-transport" class="button quiet" type="button">ลองใหม่</button></section>`;
+  const result = entry.result;
+  if (!result) return '<section class="data-card"><p class="muted">บัญชีนี้ยังดูข้อมูลรถรับส่งของนักเรียนคนนี้ไม่ได้</p></section>';
+  if (result.outstanding === undefined) return `<section class="data-card"><p class="muted">${transportNoService}</p></section>`;
+
+  const { periods, to, outstanding, openingDebt, months, unannouncedMonths, payments } = result;
+  const openingRow = openingDebt > 0 ? `<li class="transport-line"><span>ยอดยกมาจากปีก่อน</span><strong>${escapeHtml(baht(openingDebt))}</strong></li>` : '';
+  const monthRows = months.map(({ ym, monthly, daily, rides, unannounced }) => `<li><h3>${transportMonth(ym)}</h3>
+    ${monthly !== null ? `<div class="transport-line"><span>รายเดือน</span><strong>${escapeHtml(baht(monthly))}</strong></div>` : ''}
+    ${unannounced ? `<p class="muted">${transportUnannounced}</p>` : ''}
+    ${daily !== null ? `<div class="transport-line"><span>ขึ้นรถ ${rides.toLocaleString('th-TH')} วัน</span><strong>${escapeHtml(baht(daily))}</strong></div>` : ''}</li>`).join('');
+  return `<section class="data-card transport-balance"><h2>${transportDue}</h2>
+    <p class="transport-amount${outstanding > 0 ? ' is-due' : ''}">${outstanding > 0 ? `${icon('alert')}${escapeHtml(baht(outstanding))}` : 'ไม่มียอดค้าง'}</p>
+    ${outstanding < 0 ? `<p>ชำระเกิน ${escapeHtml(baht(-outstanding))}</p>` : ''}
+    <p class="helper">คิดถึงวันที่ <time datetime="${to}">${thaiDate(to)}</time></p>
+    ${unannouncedMonths.length ? `<p class="helper">ยังไม่รวมเดือน ${unannouncedMonths.map(ym => transportMonth(ym)).join(', ')} ที่ฝ่ายการเงินยังไม่ประกาศยอด</p>` : ''}</section>
+    <section class="data-card"><h2>การใช้รถ</h2>${periods.length ? `<ul class="transport-list">${periods.map(period => `<li><strong>${escapeHtml([period.zone_name, period.trip_mode, period.billing_mode].filter(Boolean).join(' · '))}</strong>
+      <p class="muted">${thaiDate(period.start_date)} ${period.end_date ? `– ${thaiDate(period.end_date)}` : 'ถึงปัจจุบัน'}</p>
+      ${period.billing_mode === 'รายวัน' ? `<p class="transport-rate">วันละ ${escapeHtml(baht(period.rate_amount))}</p>` : ''}</li>`).join('')}</ul>` : `<p class="muted">${transportNoService}</p>`}</section>
+    <section class="data-card"><h2>ยอดรายเดือน</h2>${openingRow || monthRows ? `<ul class="transport-list">${openingRow}${monthRows}</ul>` : '<p class="muted">ยังไม่มียอดรายเดือน</p>'}</section>
+    <section class="data-card"><h2>ประวัติชำระค่ารถ</h2>${payments.length ? `<ul class="transport-list">${payments.map(row => `<li class="transport-line"><div><time datetime="${escapeHtml(row.pay_date)}">${thaiDate(row.pay_date)}</time>
+      ${row.method ? `<p class="muted">${escapeHtml(row.method)}</p>` : ''}</div><strong>${escapeHtml(baht(row.amount))}</strong></li>`).join('')}</ul>` : '<p class="muted">ยังไม่มีประวัติชำระค่ารถ</p>'}</section>
+    <p class="helper transport-note">ยอดอาจเปลี่ยนเมื่อครูเช็คชื่อย้อนหลังหรือฝ่ายการเงินแก้ไข · สอบถามฝ่ายการเงิน</p>`;
+}
+
 function attendanceTileNote(entry) {
   const subjects = entry?.result?.subjects || [];
   const danger = subjects.filter(subject => subject.level === 'retake' || subject.level === 'critical').length;
@@ -1393,7 +1524,7 @@ export function childTilesMarkup(child, data, read, now = new Date()) {
         : hasHealth ? 'ดูข้อมูลสุขภาพ' : studentNo ? `เลขประจำตัว ${studentNo}` : 'ดูข้อมูลประจำตัว',
   }) + childTile('ยื่นใบลา', 'receipt', { href: `#leave/${encodeURIComponent(child.student_id)}`, detail: 'แจ้งลาป่วย/ลากิจ' }) +
     developmentTile(child, data?.development, link) + timetableTile(data?.timetable, link + '/timetable', now) +
-    childTile('รถรับส่ง', 'bus', { detail: 'เปิดให้ดูเร็ว ๆ นี้' });
+    transportTile(data?.transport, link + '/transport');
 }
 export function savingsMarkup(data, money, expanded = false, moneyLoading = false) {
   const unavailable = resourceMarkup(data);
@@ -1621,8 +1752,10 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
     const location = childLocation(hash());
     if (location.id !== id || location.section !== section || !ownsChild(id)) return;
     if (!section) return Promise.all([reads.loadProfile(id), reads.loadGradeSummary(id),
-      reads.loadSubjectAttendance(id, { summary: true }), reads.loadDevelopment(id, { summary: true }), reads.loadTimetable(id)]);
+      reads.loadSubjectAttendance(id, { summary: true }), reads.loadDevelopment(id, { summary: true }), reads.loadTimetable(id),
+      reads.loadTransport(id)]);
     if (section === 'timetable') return reads.loadTimetable(id);
+    if (section === 'transport') return reads.loadTransport(id);
     if (section === 'attendance') return reads.loadSubjectAttendance(id);
     if (section === 'profile') return reads.loadProfile(id);
     if (section === 'development') return reads.loadDevelopment(id);
@@ -1642,6 +1775,7 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
     loadLeaves(id) { if (ownsChild(id)) return reads.loadLeaves(id); },
     retryProfile(id) { if (ownsChild(id)) return reads.loadProfile(id, { force: true }); },
     retryTimetable(id) { if (ownsChild(id)) return reads.loadTimetable(id, { force: true }); },
+    retryTransport(id) { if (ownsChild(id)) return reads.loadTransport(id, { force: true }); },
     selectAttendanceTerm(id, key) { if (ownsChild(id)) return reads.loadSubjectAttendance(id, { key }); },
     retrySubjectAttendance(id) { if (ownsChild(id)) return reads.loadSubjectAttendance(id, { force: true }); },
     loadGrades(id, options) { if (ownsChild(id)) return reads.loadGrades(id, options); },
@@ -2011,6 +2145,8 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
           const table = data?.timetable?.result;
           subtitle = [table?.classroom, table?.name].filter(Boolean).join(' · ') || child.name;
           content = timetableMarkup(data?.timetable, timetableDay);
+        } else if (section === 'transport') {
+          content = transportMarkup(data?.transport);
         } else if (section === 'money') {
           content = `<section class="data-card" aria-busy="${!data || data.savings.loading || s.read.moneyLoading}"><h2>เงินออม</h2>${savingsMarkup(data?.savings, s.read.money, expandedSavings, s.read.moneyLoading)}</section>
             <section class="data-card" aria-busy="${!data || data.payments.loading}"><h2>ประวัติการชำระ</h2>${paymentsMarkup(data?.payments)}</section>`;
@@ -2019,11 +2155,12 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         }
         main.innerHTML = `<section class="child-section">${childSectionMarkup(child, sectionTitle, data, subtitle)}<div class="child-section-content">${content}</div></section>`;
       }
-      if (data && ['', 'profile', 'grades', 'attendance', 'development', 'timetable'].includes(section)) {
+      if (data && ['', 'profile', 'grades', 'attendance', 'development', 'timetable', 'transport'].includes(section)) {
         void Promise.resolve().then(() => controller.loadChildPage(id, section));
       }
       main.querySelector('#retry-profile')?.addEventListener('click', () => { void controller.retryProfile(id); });
       main.querySelector('#retry-timetable')?.addEventListener('click', () => { void controller.retryTimetable(id); });
+      main.querySelector('#retry-transport')?.addEventListener('click', () => { void controller.retryTransport(id); });
       main.querySelectorAll('[data-timetable-day]').forEach(button => button.addEventListener('click', () => {
         timetableDay = Number(button.dataset.timetableDay); controller.notify();
       }));
@@ -2127,7 +2264,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         main.querySelector('#subject-attendance-heading')?.focus({ preventScroll: true });
       } else if (activeId === 'retry-development') {
         (main.querySelector('[data-development-term][aria-pressed="true"]') || main.querySelector('h1'))?.focus({ preventScroll: true });
-      } else if (activeId === 'retry-timetable') {
+      } else if (activeId === 'retry-timetable' || activeId === 'retry-transport') {
         main.querySelector('h1')?.focus({ preventScroll: true });
       }
     }
