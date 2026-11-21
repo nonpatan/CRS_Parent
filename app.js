@@ -25,6 +25,7 @@ const childSections = {
   attendance: 'การมาเรียน',
   grades: 'ผลการเรียน',
   development: 'กิจกรรม · คุณลักษณะ',
+  timetable: 'ตารางเรียน',
   money: 'เงินออม · การชำระ',
   profile: 'ข้อมูลประจำตัว',
 };
@@ -255,14 +256,14 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
   loadReport = () => import(REPORT_MODULE_URL) } = {}) {
   const state = { children: {}, feed: resource(), calendar: resource(), schoolDays: null,
     money: null, moneyLoading: false, today: bangkokDate(now()), loading: false, loadedAt: {} };
-  let version = 0, schoolDaysPending;
+  let version = 0, schoolDaysPending, schoolDaysThrough = '';
   const revisions = new WeakMap();
   const termRequests = new WeakMap();
   function reset() {
     version++;
     state.children = {}; state.feed = resource(); state.calendar = resource();
     state.money = null; state.moneyLoading = false;
-    state.schoolDays = null; schoolDaysPending = undefined;
+    state.schoolDays = null; schoolDaysPending = undefined; schoolDaysThrough = '';
     state.loading = false; state.loadedAt = {};
   }
   async function load(children, { quiet = false, page = 'all', studentId = '', section = '' } = {}) {
@@ -275,6 +276,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       state.moneyLoading = true;
       for (const child of children) state.children[child.student_id] = { attendance: resource(), savings: resource(), payments: resource(), leaves: resource(),
         profile: { ...resource(), started: false, refreshing: false },
+        timetable: { loading: true, pending: false, date: '', error: '', result: undefined },
         attendanceView: { secondary: isSecondary(child), selected: '', entries: new Map() },
         grades: hasAcademicReports(child) ? { primary: isPrimary(child), started: false, terms: resource(),
           selected: '', entries: new Map() } : null,
@@ -308,6 +310,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       }
     }
     const attendance = page !== 'calendar' && (!section || section === 'attendance');
+    const timetable = page === 'child' && (!section || section === 'timetable');
     const finance = page !== 'calendar' && (!section || section === 'money');
     const money = finance && (!quiet || !state.money) ? (async () => {
       try {
@@ -316,7 +319,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       } catch { /* Keep raw transactions visible; never substitute a local formula. */ }
       finally { if (version === ownVersion) { state.moneyLoading = false; changed(); } }
     })() : Promise.resolve();
-    const schoolDays = attendance ? (async () => {
+    const schoolDays = attendance || timetable ? (async () => {
       const to = shiftDate(state.today, 120);
       // A known start is useful on refresh, provided the RPC's 400-day cap allows it.
       const from = knownYearStart && knownYearStart >= shiftDate(to, -400) && knownYearStart <= to
@@ -326,13 +329,16 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
         if (version !== ownVersion) return null;
         if (!error) {
           const metadata = schoolDaysMetadata(data);
-          if (metadata || !quiet) state.schoolDays = metadata;
+          if (metadata || !quiet) {
+            state.schoolDays = metadata;
+            schoolDaysThrough = metadata ? to : '';
+          }
         }
       } catch { /* Optional metadata: keep the original attendance behaviour on failure. */ }
       if (version === ownVersion) { changed(); return state.schoolDays; }
       return null;
     })() : Promise.resolve(state.schoolDays);
-    if (attendance) schoolDaysPending = schoolDays;
+    if (attendance || timetable) schoolDaysPending = schoolDays;
     const jobs = [money, schoolDays];
     if (page === 'all' || page === 'home') jobs.push(fetchRows(state.feed, 'parent_feed', { p_days: 14 }));
     if (page === 'all' || page === 'calendar') jobs.push(fetchRows(state.calendar, 'public_calendar', { p_from: shiftDate(state.today, -7), p_to: shiftDate(state.today, 120) }));
@@ -348,6 +354,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       if (finance) jobs.push(fetchRows(target.savings, 'child_savings', args));
       if (finance && page !== 'home') jobs.push(fetchRows(target.payments, 'child_payments', { ...args, p_limit: 50 }));
       if (quiet && page === 'child') {
+        if (timetable) jobs.push(loadTimetable(child.student_id, { quiet: true }));
         const refreshGrades = target.grades?.started && (!section || section === 'grades');
         if (refreshGrades) {
           jobs.push(loadGradeTerms(child.student_id, { force: true }));
@@ -436,6 +443,68 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       if (current()) {
         profile.loading = false; profile.refreshing = false;
         state.loadedAt[`child/${studentId}/profile`] = now().getTime();
+        changed();
+      }
+    }
+  }
+  async function loadTimetable(studentId, { force = false, quiet = false } = {}) {
+    const target = state.children[studentId]?.timetable, date = bangkokDate(now());
+    if (!target || target.pending || (!force && !quiet && target.date === date)) return;
+    const ownVersion = version, holidaysPending = schoolDaysPending;
+    const current = () => version === ownVersion;
+    target.date = date;
+    target.pending = true;
+    if (!quiet) { target.loading = target.result === undefined; target.error = ''; changed(); }
+
+    async function fetchTimetable(day) {
+      const { data, error } = await sb.rpc('child_timetable', { p_student_id: studentId, p_date: day });
+      if (error) throw error;
+      return prepareTimetable(data);
+    }
+    async function timetableHolidays(model, from, through, metadata) {
+      const fallback = new Set(metadata?.holidays.map(day => day.date));
+      if (model.end_date <= through || nextTeachingDate(model, shiftDate(from, 1), {
+        holidays: fallback, through, withLesson: true,
+      })) return fallback;
+      try {
+        const { data, error } = await sb.rpc('parent_school_days', {
+          p_from: from, p_to: model.end_date < shiftDate(from, 400) ? model.end_date : shiftDate(from, 400),
+        });
+        const calendar = !error && schoolDaysMetadata(data);
+        if (calendar) return new Set(calendar.holidays.map(day => day.date));
+      } catch { /* The weekly schedule is still available if the holiday lookup fails. */ }
+      return fallback;
+    }
+    try {
+      const [result, metadata] = await Promise.all([fetchTimetable(date), holidaysPending]);
+      if (!current()) return;
+      let next = null;
+      if (result?.hasPlacements) {
+        const from = result.start_date > date ? result.start_date : date;
+        const through = schoolDaysThrough || shiftDate(date, 120);
+        result.holidays = await timetableHolidays(result, from, through, metadata);
+        if (!current()) return;
+        // At the end of a published timetable, look for the next published one.
+        if (from === date && result.end_date < shiftDate(date, 400) &&
+            !nextTeachingDate(result, shiftDate(date, 1), { withLesson: true }) &&
+            [...result.days.values()].some(rows => rows.some(hasTeachingLesson))) {
+          try {
+            next = await fetchTimetable(shiftDate(result.end_date, 1));
+            if (!current()) return;
+            if (next?.hasPlacements) next.holidays = await timetableHolidays(next, next.start_date, through, metadata);
+          } catch { next = null; }
+        }
+      }
+      if (!current()) return;
+      target.result = result;
+      target.next = next;
+      target.error = '';
+    } catch {
+      if (current() && (!quiet || target.result === undefined)) target.error = timetableError;
+    } finally {
+      if (current()) {
+        target.loading = false; target.pending = false;
+        state.loadedAt[`child/${studentId}/timetable`] = now().getTime();
         changed();
       }
     }
@@ -651,7 +720,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       }
     }
   }
-  return { state, load, reset, loadLeaves, loadProfile, loadSubjectAttendance, loadGrades: loadGradeTerms,
+  return { state, load, reset, loadLeaves, loadProfile, loadTimetable, loadSubjectAttendance, loadGrades: loadGradeTerms,
     loadGradeSummary, selectGradeTerm, loadDevelopment };
 }
 
@@ -1096,12 +1165,162 @@ export function childTodayMarkup(data, read) {
   return `<p class="child-today ${tone}" role="status">${icon(symbol)}<span>${escapeHtml(label)}</span></p>`;
 }
 
-function childTile(label, symbol, { href, value, detail, busy = false, warning = false, extra = '' } = {}) {
+const timetableError = 'โหลดตารางเรียนไม่สำเร็จ ตรวจอินเทอร์เน็ตแล้วลองใหม่';
+const timetableNoRoom = 'โรงเรียนยังไม่มีตารางเรียนของห้องนี้ในระบบ';
+const timetableWeekdays = ['', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์', 'อาทิตย์'];
+const timetableDayLabels = ['', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส', 'อา'];
+const bangkokClock = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+});
+function weekdayOf(date) {
+  return new Date(`${date}T12:00:00Z`).getUTCDay() || 7;
+}
+function prepareTimetable(data) {
+  if (data === null) return null;
+  if (data?.timetable === null) return { hasPlacements: false };
+  const table = data?.timetable;
+  if (!table || !validSchoolDate(table.start_date) || !validSchoolDate(table.end_date) ||
+      table.end_date < table.start_date || !Array.isArray(table.teaching_days) ||
+      !Array.isArray(data.columns) || !Array.isArray(data.placements)) throw Error('Invalid timetable');
+
+  let period = 0;
+  const columns = data.columns.slice().sort((a, b) => a.seq - b.seq).map(column => ({
+    ...column, period: column.kind === 'คาบเรียน' ? ++period : null,
+  }));
+  const bySequence = new Map(columns.map(column => [column.seq, column]));
+  const days = new Map([...new Set(table.teaching_days)].filter(day => timetableWeekdays[day]).sort((a, b) => a - b)
+    .map(day => [day, new Map()]));
+  let hasPlacements = false;
+  for (const { weekday, column_seq, span, title, subject_code, facility, teachers } of data.placements) {
+    const placements = days.get(weekday), column = bySequence.get(column_seq), last = bySequence.get(column_seq + span - 1);
+    if (!placements || !column || !last || column.kind === 'พัก') continue;
+    if (!placements.has(column_seq)) placements.set(column_seq, []);
+    placements.get(column_seq).push({ title, subject_code, facility, teachers: (teachers || []).filter(Boolean),
+      end: last.end_time, lastSeq: last.seq });
+    hasPlacements = true;
+  }
+  for (const [day, placements] of days) {
+    const rows = [];
+    let coveredThrough = 0;
+    for (const column of columns) {
+      const lessons = placements.get(column.seq) || [];
+      if (!lessons.length && column.seq <= coveredThrough) continue;
+      const end = lessons.reduce((latest, lesson) => lesson.end > latest ? lesson.end : latest, column.end_time);
+      for (const lesson of lessons) coveredThrough = Math.max(coveredThrough, lesson.lastSeq);
+      rows.push({ ...column, end, lessons });
+    }
+    days.set(day, rows);
+  }
+  return { name: table.name, classroom: classLabel(data), start_date: table.start_date, end_date: table.end_date,
+    days, hasPlacements, holidays: new Set() };
+}
+function hasTeachingLesson(row) { return Boolean(row.period && row.lessons.length); }
+function nextTeachingDate(table, from, { holidays = table.holidays, through = table.end_date, withLesson = false } = {}) {
+  const end = through < table.end_date ? through : table.end_date;
+  for (let date = from < table.start_date ? table.start_date : from; date <= end; date = shiftDate(date, 1)) {
+    const rows = table.days.get(weekdayOf(date));
+    if (rows && !holidays.has(date) && (!withLesson || rows.some(hasTeachingLesson))) return date;
+  }
+  return '';
+}
+function isTimetableToday(table, today) {
+  return today >= table.start_date && today <= table.end_date;
+}
+function isCurrentLesson(row, lesson, time) {
+  return row.start_time <= time && time < lesson.end;
+}
+function timetableTile(entry, href, now) {
+  const options = { href, className: 'timetable-tile' };
+  if (!entry || entry.loading) options.busy = true;
+  else if (entry.error) options.detail = 'ยังแสดงตารางเรียนไม่ได้';
+  else if (entry.result === null) options.detail = 'บัญชีนี้ยังดูตารางเรียนของนักเรียนคนนี้ไม่ได้';
+  else if (!entry.result?.hasPlacements) {
+    options.value = '—'; options.detail = 'ยังไม่มีตารางเรียนของห้องนี้';
+  } else {
+    const table = entry.result, today = bangkokDate(now), time = bangkokClock.format(now), weekday = weekdayOf(today);
+    const lessonsToday = isTimetableToday(table, today) && !table.holidays.has(today)
+      ? (table.days.get(weekday) || []).filter(hasTeachingLesson) : [];
+    const current = lessonsToday.find(row => row.lessons.some(lesson => isCurrentLesson(row, lesson, time)));
+    const upcoming = lessonsToday.find(row => time < row.start_time);
+    if (current) {
+      const lesson = current.lessons.find(lesson => isCurrentLesson(current, lesson, time));
+      options.value = `คาบ ${current.period} · ${lesson.title}`;
+      options.detail = ['ตอนนี้', `${current.start_time}–${lesson.end}`, ...lesson.teachers].join(' · ');
+    } else if (upcoming) {
+      options.value = `คาบ ${upcoming.period} · ${upcoming.lessons[0].title}`;
+      options.detail = `ถัดไป ${upcoming.start_time}`;
+    } else {
+      const from = shiftDate(today, 1);
+      const date = nextTeachingDate(table, from, { withLesson: true }), next = entry.next;
+      const firstDate = date || (next?.hasPlacements && nextTeachingDate(next, from, { withLesson: true }));
+      if (firstDate) {
+        const day = weekdayOf(firstDate);
+        const first = (date ? table : next).days.get(day).find(hasTeachingLesson);
+        options.value = timetableWeekdays[day];
+        options.detail = `คาบแรก ${first.start_time} · ${first.lessons[0].title}`;
+      } else {
+        options.value = '—'; options.detail = 'ยังไม่พบคาบเรียนถัดไป';
+      }
+    }
+  }
+  return childTile(childSections.timetable, 'clock', options);
+}
+function timetableRowMarkup(row, time) {
+  const hours = `<span class="timetable-time">${escapeHtml(row.start_time)}–${escapeHtml(row.end)}</span>`;
+  if (row.kind === 'พัก') {
+    const lunch = row.start_time < '13:00' && row.end > '12:00';
+    return `<li class="timetable-break"><span>${lunch ? 'พักกลางวัน' : 'พัก'}</span> ${hours}</li>`;
+  }
+  const current = row.lessons.some(lesson => isCurrentLesson(row, lesson, time));
+  const past = Boolean(time && row.end <= time);
+  const lessons = row.lessons.map(lesson => {
+    const ownTime = lesson.end !== row.end
+      ? `<span class="timetable-time">${escapeHtml(row.start_time)}–${escapeHtml(lesson.end)}</span>` : '';
+    return `<li class="timetable-lesson${time && lesson.end <= time ? ' is-past' : ''}">
+      <strong>${escapeHtml(lesson.title)}</strong>
+      ${row.lessons.length > 1 && isCurrentLesson(row, lesson, time) ? '<span class="timetable-badge">ตอนนี้</span>' : ''}
+      ${lesson.subject_code || ownTime ? `<p class="timetable-meta">${escapeHtml(lesson.subject_code)} ${ownTime}</p>` : ''}
+      ${lesson.teachers.length ? `<p class="timetable-meta">${escapeHtml(lesson.teachers.join(' · '))}</p>` : ''}
+      ${lesson.facility ? `<p class="timetable-meta">${escapeHtml(lesson.facility)}</p>` : ''}</li>`;
+  }).join('');
+  return `<li class="timetable-row${current ? ' is-current' : ''}${past ? ' is-past' : ''}">
+    <div class="timetable-row-time">${hours}<span class="timetable-meta">${row.period ? `คาบ ${row.period}` : 'กิจกรรม'}</span>
+      ${current && row.lessons.length === 1 ? '<span class="timetable-badge">ตอนนี้</span>' : ''}</div>
+    ${lessons ? `<ul class="timetable-lessons">${lessons}</ul>` : '<span class="muted">ว่าง</span>'}</li>`;
+}
+export function timetableMarkup(entry, selected, now = new Date()) {
+  const status = (message, role = '') => `<section class="data-card" aria-label="ตารางเรียน"><p class="muted"${role ? ` role="${role}"` : ''}>${message}</p></section>`;
+  if (!entry || entry.loading) return status(`${busyIcon()}กำลังโหลดตารางเรียน…`, 'status');
+  if (entry.error) return `<section class="data-card" aria-label="ตารางเรียน"><p class="field-error" role="alert">${timetableError}</p><button id="retry-timetable" class="button quiet" type="button">ลองใหม่</button></section>`;
+  const table = entry.result;
+  if (table === null) return status('บัญชีนี้ยังดูตารางเรียนของนักเรียนคนนี้ไม่ได้');
+  if (!table?.start_date) return status('โรงเรียนยังไม่ได้เผยแพร่ตารางเรียน');
+  if (!table.hasPlacements) return status(timetableNoRoom);
+
+  const today = bangkokDate(now), todayInTable = isTimetableToday(table, today);
+  const todayWeekday = todayInTable ? weekdayOf(today) : null;
+  const nextDate = nextTeachingDate(table, today);
+  const firstDay = table.days.keys().next().value;
+  const day = table.days.has(selected) ? selected : nextDate ? weekdayOf(nextDate) : firstDay;
+  const time = day === todayWeekday && !table.holidays.has(today) ? bangkokClock.format(now) : '';
+  const chips = [...table.days.keys()].map(weekday => `<button class="filter-chip" type="button" id="timetable-day-${weekday}" data-timetable-day="${weekday}"
+      aria-pressed="${weekday === day}" aria-controls="timetable-schedule" aria-label="วัน${timetableWeekdays[weekday]}${weekday === todayWeekday ? ' วันนี้' : ''}">
+      <span>${timetableDayLabels[weekday]}</span>${weekday === todayWeekday ? '<span class="timetable-today">วันนี้</span>' : ''}</button>`).join('');
+  return `${table.start_date > today ? `<p class="timetable-start">ตารางนี้เริ่มใช้ ${thaiDate(table.start_date)}</p>` : ''}
+    <div class="timetable-days" role="group" aria-label="เลือกวันเรียน">${chips}</div>
+    <section class="timetable-schedule" id="timetable-schedule" aria-labelledby="timetable-heading">
+      <h2 id="timetable-heading" aria-live="polite">วัน${timetableWeekdays[day]}</h2>
+      <ol class="timetable-rows">${table.days.get(day).map(row => timetableRowMarkup(row, time)).join('')}</ol>
+    </section>
+    <p class="helper timetable-note">บางวันอาจมีสอนแทนหรือแลกคาบ ตารางนี้เป็นตารางประจำสัปดาห์</p>`;
+}
+
+function childTile(label, symbol, { href, value, detail, busy = false, warning = false, extra = '', className = '' } = {}) {
   const content = `<span class="tile-icon">${icon(symbol)}</span><strong class="tile-label">${label}</strong>
     ${value ? `<strong class="tile-value">${escapeHtml(value)}</strong>` : ''}
     ${busy ? `<span class="tile-detail">${busyIcon()}กำลังโหลด…</span>`
       : detail === undefined ? '' : `<span class="tile-detail${warning ? ' tile-warning' : ''}">${warning ? icon('alert') : ''}${escapeHtml(detail)}</span>`}${extra}`;
-  return href ? `<a class="child-tile" href="${href}">${content}</a>`
+  return href ? `<a class="child-tile${className ? ' ' + className : ''}" href="${href}">${content}</a>`
     : `<div class="child-tile tile-upcoming">${content}</div>`;
 }
 function attendanceTileNote(entry) {
@@ -1147,7 +1366,7 @@ function gradeTile(child, grades, href) {
   }
   return childTile(childSections.grades, 'book', { href, value, busy, detail });
 }
-export function childTilesMarkup(child, data, read) {
+export function childTilesMarkup(child, data, read, now = new Date()) {
   const currentTerm = attendanceTerms(read.schoolDays, read.today).at(-1);
   const link = childHref(child.student_id), stats = attendanceStats(data?.attendance, read, currentTerm);
   const secondary = isSecondary(child);
@@ -1173,8 +1392,8 @@ export function childTilesMarkup(child, data, read) {
       : warnings.length ? `มีข้อควรระวัง ${warnings.length} รายการ` : bloodType ? `กรุ๊ปเลือด ${bloodType}`
         : hasHealth ? 'ดูข้อมูลสุขภาพ' : studentNo ? `เลขประจำตัว ${studentNo}` : 'ดูข้อมูลประจำตัว',
   }) + childTile('ยื่นใบลา', 'receipt', { href: `#leave/${encodeURIComponent(child.student_id)}`, detail: 'แจ้งลาป่วย/ลากิจ' }) +
-    developmentTile(child, data?.development, link) + [['ตารางเรียน', 'clock'], ['รถรับส่ง', 'bus']].map(([label, symbol]) =>
-      childTile(label, symbol, { detail: 'เปิดให้ดูเร็ว ๆ นี้' })).join('');
+    developmentTile(child, data?.development, link) + timetableTile(data?.timetable, link + '/timetable', now) +
+    childTile('รถรับส่ง', 'bus', { detail: 'เปิดให้ดูเร็ว ๆ นี้' });
 }
 export function savingsMarkup(data, money, expanded = false, moneyLoading = false) {
   const unavailable = resourceMarkup(data);
@@ -1389,7 +1608,10 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
     const page = isChild ? 'child' : route;
     const scope = isChild ? `child/${studentId}${section ? `/${section}` : ''}` : page;
     const loadedAt = state.read.loadedAt[scope];
-    if (loadedAt === undefined || now().getTime() - loadedAt <= 60_000) return;
+    if (loadedAt === undefined || now().getTime() - loadedAt <= 60_000) {
+      if (isChild && (!section || section === 'timetable')) notify();
+      return;
+    }
     // Same read version/revisions guard every reply after reset, sign-out or account change.
     return reads.load(state.children, { quiet: true, page, studentId, section });
   }
@@ -1399,7 +1621,8 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
     const location = childLocation(hash());
     if (location.id !== id || location.section !== section || !ownsChild(id)) return;
     if (!section) return Promise.all([reads.loadProfile(id), reads.loadGradeSummary(id),
-      reads.loadSubjectAttendance(id, { summary: true }), reads.loadDevelopment(id, { summary: true })]);
+      reads.loadSubjectAttendance(id, { summary: true }), reads.loadDevelopment(id, { summary: true }), reads.loadTimetable(id)]);
+    if (section === 'timetable') return reads.loadTimetable(id);
     if (section === 'attendance') return reads.loadSubjectAttendance(id);
     if (section === 'profile') return reads.loadProfile(id);
     if (section === 'development') return reads.loadDevelopment(id);
@@ -1418,6 +1641,7 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
     discardLeave() { resetLeave(); },
     loadLeaves(id) { if (ownsChild(id)) return reads.loadLeaves(id); },
     retryProfile(id) { if (ownsChild(id)) return reads.loadProfile(id, { force: true }); },
+    retryTimetable(id) { if (ownsChild(id)) return reads.loadTimetable(id, { force: true }); },
     selectAttendanceTerm(id, key) { if (ownsChild(id)) return reads.loadSubjectAttendance(id, { key }); },
     retrySubjectAttendance(id) { if (ownsChild(id)) return reads.loadSubjectAttendance(id, { force: true }); },
     loadGrades(id, options) { if (ownsChild(id)) return reads.loadGrades(id, options); },
@@ -1552,11 +1776,11 @@ function childHubMarkup(child, s) {
       <h2>ดูข้อมูลลูก</h2><div class="child-tiles">${childTilesMarkup(child, data, s.read)}</div>
     </div></section>`;
 }
-function childSectionMarkup(child, title, data) {
+function childSectionMarkup(child, title, data, subtitle = child.name) {
   const name = childShortName(child, data);
   return `<header class="child-section-header">
     <a class="button child-section-back" href="${childHref(child.student_id)}">${icon('back')}${escapeHtml(name ? `แฟ้มของ${name}` : 'แฟ้มลูก')}</a>
-    <h1 tabindex="-1">${title}</h1><p>${escapeHtml(child.name)}</p>
+    <h1 tabindex="-1">${title}</h1><p>${escapeHtml(subtitle)}</p>
   </header>`;
 }
 
@@ -1567,6 +1791,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
   let previousRoute = '', previousView = '', deferredPrompt = initialPrompt, installBusy = false, installError = '';
   let selectedChildId = null, filterAccountId = null;
   let lastChildId = null, detailChildId = null, detailMonth = '', expandedSavings = false, homeScroll = 0, homeFilterScroll = 0;
+  let timetableDay = null;
   const hubScroll = new Map();
   let closeDialog = null;
   let dismissed = false;
@@ -1639,6 +1864,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
     if (previousRoute === 'home') { homeScroll = win.scrollY; homeFilterScroll = filterScroll; }
     if (previousRoute === 'child' && detailChildId) hubScroll.set(detailChildId, win.scrollY);
     const focusRoute = view !== previousView;
+    if (focusRoute) timetableDay = null;
     const returningHome = route === 'home' && ['child', 'childSection'].includes(previousRoute);
     const returningHub = route === 'child' && ['childSection', 'leave'].includes(previousRoute) && childLocation(previousView).id === id;
     if (previousRoute === 'leave' && view !== previousView && s.leaveDraft) controller.discardLeave();
@@ -1766,7 +1992,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
       if (!section) {
         main.innerHTML = childHubMarkup(child, s);
       } else {
-        let content;
+        let content, subtitle;
         if (section === 'attendance') {
           const terms = attendanceTerms(s.read.schoolDays, s.read.today);
           const term = selectedAttendanceTerm(terms, data?.attendanceView);
@@ -1781,18 +2007,26 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
           content = `<section class="data-card" aria-label="ผลการเรียน" aria-busy="${busy}">${gradesMarkup(child, grades)}</section>`;
         } else if (section === 'development') {
           content = developmentMarkup(data?.development);
+        } else if (section === 'timetable') {
+          const table = data?.timetable?.result;
+          subtitle = [table?.classroom, table?.name].filter(Boolean).join(' · ') || child.name;
+          content = timetableMarkup(data?.timetable, timetableDay);
         } else if (section === 'money') {
           content = `<section class="data-card" aria-busy="${!data || data.savings.loading || s.read.moneyLoading}"><h2>เงินออม</h2>${savingsMarkup(data?.savings, s.read.money, expandedSavings, s.read.moneyLoading)}</section>
             <section class="data-card" aria-busy="${!data || data.payments.loading}"><h2>ประวัติการชำระ</h2>${paymentsMarkup(data?.payments)}</section>`;
         } else {
           content = profileMarkup(data?.profile);
         }
-        main.innerHTML = `<section class="child-section">${childSectionMarkup(child, sectionTitle, data)}<div class="child-section-content">${content}</div></section>`;
+        main.innerHTML = `<section class="child-section">${childSectionMarkup(child, sectionTitle, data, subtitle)}<div class="child-section-content">${content}</div></section>`;
       }
-      if (data && ['', 'profile', 'grades', 'attendance', 'development'].includes(section)) {
+      if (data && ['', 'profile', 'grades', 'attendance', 'development', 'timetable'].includes(section)) {
         void Promise.resolve().then(() => controller.loadChildPage(id, section));
       }
       main.querySelector('#retry-profile')?.addEventListener('click', () => { void controller.retryProfile(id); });
+      main.querySelector('#retry-timetable')?.addEventListener('click', () => { void controller.retryTimetable(id); });
+      main.querySelectorAll('[data-timetable-day]').forEach(button => button.addEventListener('click', () => {
+        timetableDay = Number(button.dataset.timetableDay); controller.notify();
+      }));
       main.querySelectorAll('[data-attendance-term]').forEach(button => button.addEventListener('click', () => {
         void controller.selectAttendanceTerm(id, button.dataset.attendanceTerm);
       }));
@@ -1893,6 +2127,8 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         main.querySelector('#subject-attendance-heading')?.focus({ preventScroll: true });
       } else if (activeId === 'retry-development') {
         (main.querySelector('[data-development-term][aria-pressed="true"]') || main.querySelector('h1'))?.focus({ preventScroll: true });
+      } else if (activeId === 'retry-timetable') {
+        main.querySelector('h1')?.focus({ preventScroll: true });
       }
     }
   }
