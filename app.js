@@ -4,6 +4,9 @@ export const CLIENT_OPTIONS = { auth: {
   storageKey: 'crs-parent-auth', flowType: 'pkce', detectSessionInUrl: true, persistSession: true,
 } };
 export const INSTALL_DISMISSED_KEY = 'crs-parent-install-dismissed';
+const PUSH_DISMISSED_KEY = 'crs-parent-push-dismissed';
+// VAPID public key สำหรับ Web Push จาก parent-notify
+export const VAPID_PUBLIC_KEY = 'BAAa-Zq03kKgH3G3TMUhG5eL0a1oTNdHSD7cwWimCT69-gbDbAkjFzDqkdiK59o8H4PcoAkBZeeA4zA0n345qvA';
 export const MONEY_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/money.js?v=20261121-2';
 export const GRADES_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/grades.js?v=20261121-1';
 export const REPORT_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/report-card.js?v=20261121-2';
@@ -52,7 +55,7 @@ export function routeFor({ session, loaded, loading, loadError, children }, hash
   }
   if (hash.startsWith('#child/')) return 'childMissing';
   if (/^#leave\/[^/]+$/.test(hash)) return 'leave';
-  return ['#redeem', '#calendar', '#account'].includes(hash) ? hash.slice(1) : 'home';
+  return ['#redeem', '#calendar', '#account', '#notifications'].includes(hash) ? hash.slice(1) : 'home';
 }
 
 export function authErrorMessage(error) {
@@ -95,10 +98,13 @@ export function oauthErrorFromUrl(href) {
     url.searchParams.get('error') || fragment.get('error') || '';
 }
 
-export function installKind({ userAgent, platform = '', maxTouchPoints = 0, standalone, dismissed, prompt }) {
+function isIOS({ userAgent, platform = '', maxTouchPoints = 0 }) {
+  return /iPhone|iPad|iPod/i.test(userAgent) || (platform === 'MacIntel' && maxTouchPoints > 1);
+}
+
+export function installKind({ userAgent, platform, maxTouchPoints, standalone, dismissed, prompt }) {
   if (standalone || dismissed) return null;
-  const ios = /iPhone|iPad|iPod/i.test(userAgent) || (platform === 'MacIntel' && maxTouchPoints > 1);
-  if (ios && /Safari/i.test(userAgent) && !/CriOS|FxiOS|EdgiOS|OPiOS/i.test(userAgent)) return 'ios';
+  if (isIOS({ userAgent, platform, maxTouchPoints }) && /Safari/i.test(userAgent) && !/CriOS|FxiOS|EdgiOS|OPiOS/i.test(userAgent)) return 'ios';
   return prompt ? 'prompt' : null;
 }
 
@@ -1653,17 +1659,154 @@ export function calendarMarkup(data) {
   return [...groups].map(([month, rows]) => `<section class="calendar-month"><h2>${escapeHtml(thaiDate(`${month}-01`, { day: undefined, month: 'long' }))}</h2>${rows.map(row => `<article class="calendar-card"><p class="calendar-date">${escapeHtml(thaiDate(row.start_date))}${row.end_date !== row.start_date ? ` – ${escapeHtml(thaiDate(row.end_date))}` : ''}</p><h3>${escapeHtml(row.title)}</h3><span class="grade-chip">${escapeHtml(row.category)}</span>${row.detail ? `<details><summary>รายละเอียด</summary><p class="event-detail">${escapeHtml(row.detail)}</p></details>` : ''}</article>`).join('')}</section>`).join('');
 }
 
+const pushSetupError = 'ยังเปิดรับแจ้งเตือนบนเครื่องไม่ได้ โรงเรียนกำลังตั้งค่าระบบ';
+
+export function createPushDevice(sb, win, { registration, standalone, publicKey = VAPID_PUBLIC_KEY }) {
+  const unavailable = () => {
+    if (isIOS(win.navigator) && !standalone()) return 'install';
+    if (!win.PushManager || !win.Notification || !win.navigator.serviceWorker) return 'unsupported';
+    if (win.Notification.permission === 'denied') return 'denied';
+    return '';
+  };
+  async function status() {
+    const blocked = unavailable();
+    if (blocked) return blocked;
+    const worker = await registration();
+    return await worker?.pushManager?.getSubscription() ? 'enabled' : 'off';
+  }
+  async function enable(isCurrent) {
+    const blocked = unavailable();
+    if (blocked) return blocked;
+    if (!publicKey) throw Error(pushSetupError);
+    // ขอสิทธิ์จากคลิกโดยตรงก่อนรอ service worker
+    const permission = win.Notification.permission === 'granted' ? 'granted' : await win.Notification.requestPermission();
+    if (permission !== 'granted' || !isCurrent()) return permission === 'denied' ? 'denied' : 'off';
+    const worker = await registration();
+    if (!worker?.pushManager) throw Error();
+    const bytes = win.atob(publicKey.replace(/-/g, '+').replace(/_/g, '/'));
+    const applicationServerKey = Uint8Array.from(bytes, char => char.charCodeAt(0));
+    let subscription = await worker.pushManager.getSubscription();
+    if (!isCurrent()) return 'off';
+    subscription ||= await worker.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey });
+    try {
+      if (!isCurrent()) throw Error();
+      const { endpoint, keys } = subscription.toJSON();
+      if (!keys?.p256dh || !keys.auth) throw Error();
+      const { error } = await sb.rpc('register_push_subscription', {
+        p_endpoint: endpoint, p_p256dh: keys.p256dh, p_auth: keys.auth, p_user_agent: win.navigator.userAgent,
+      });
+      if (error) throw error;
+      return 'enabled';
+    } catch {
+      await subscription.unsubscribe().catch(() => {});
+      throw Error();
+    }
+  }
+  async function disable() {
+    const worker = await registration();
+    const subscription = await worker?.pushManager?.getSubscription();
+    if (subscription) {
+      try {
+        await sb.rpc('unregister_push_subscription', { p_endpoint: subscription.endpoint });
+      } catch { /* ยังถอนบนเครื่องได้แม้ RPC ล้ม */ }
+      const unsubscribed = await subscription.unsubscribe().catch(() => false);
+      if (!unsubscribed && await worker.pushManager.getSubscription()) throw Error();
+    }
+    // ล้างข้อความของแอปที่ค้างอยู่ในศูนย์แจ้งเตือนของเครื่องที่ใช้ร่วมกัน
+    const visible = await worker?.getNotifications?.().catch(() => []);
+    visible?.forEach(notification => notification.close());
+    return 'off';
+  }
+  return { status, enable, disable };
+}
+
+const notificationsReadError = 'บันทึกว่าอ่านแล้วไม่สำเร็จ ตรวจอินเทอร์เน็ตแล้วลองอีกครั้ง';
+
+export function notificationHref(value) {
+  return typeof value === 'string' && /^#(?:home|notifications|child\/[\w-]+(?:\/[a-z]+)?)$/.test(value) ? value : '#notifications';
+}
+
+function notificationDate(value, now = new Date()) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
+  const today = bangkokDate(now), day = bangkokDate(date);
+  if (day === today) return 'วันนี้ ' + new Intl.DateTimeFormat('th-TH', {
+    timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).format(date);
+  return day === shiftDate(today, -1) ? 'เมื่อวาน' : thaiDate(value);
+}
+
+const notificationIcons = new Map([
+  ['ขาดเรียน', 'alert'], ['มาสาย', 'clock'], ['ผลใบลา', 'check'],
+  ['ใบแจ้งค่าธรรมเนียม', 'receipt'], ['ยกเลิกใบแจ้ง', 'close'], ['ประกาศผล', 'book'], ['เกินเกณฑ์มส', 'alert'],
+]);
+
+export function unreadLabel(count) { return `แจ้งเตือน ยังไม่อ่าน ${count} รายการ`; }
+function unreadCount(inbox) { return inbox.rows.filter(row => !row.read_at).length; }
+
+export function notificationsMarkup(inbox, now = new Date()) {
+  const rows = inbox.rows.map(row => `<li><a id="notification-${escapeHtml(row.id)}" class="notification-row${row.read_at ? '' : ' unread'}"
+      href="${notificationHref(row.url)}" data-notification-id="${escapeHtml(row.id)}"${inbox.busy ? ' aria-disabled="true"' : ''}>
+      <span class="notification-icon">${icon(notificationIcons.get(row.kind) || 'bell')}</span>
+      <div><span class="notification-title">${row.read_at ? '' : '<span class="visually-hidden">ยังไม่อ่าน </span>'}${escapeHtml(row.title)}</span>
+        <p>${escapeHtml(row.body)}</p><time datetime="${escapeHtml(row.created_at)}">${escapeHtml(notificationDate(row.created_at, now))}</time></div>
+    </a></li>`).join('');
+  const status = inbox.loading && !rows ? '<p class="data-status" role="status">' + busyIcon() + 'กำลังโหลดแจ้งเตือน…</p>'
+    : inbox.error ? `<p class="field-error" role="alert">${escapeHtml(inbox.error)}</p><button id="retry-notifications" class="button quiet">ลองใหม่</button>`
+    : !rows ? `<div class="empty-page"><span class="empty-icon">${icon('bell')}</span><p>ยังไม่มีการแจ้งเตือน</p></div>` : '';
+  return `<section class="screen-page notifications-screen"><a class="button quiet" href="#home">${icon('back')}วันนี้</a>
+    <div class="notifications-heading"><h1 tabindex="-1">แจ้งเตือน</h1>
+    ${rows ? `<button id="read-all-notifications" class="button secondary" ${inbox.busy ? 'disabled' : ''}>
+      ${inbox.busy === 'all' ? busyIcon() + 'กำลังบันทึก…' : 'อ่านทั้งหมด'}</button>` : ''}</div>
+    ${status}<p id="notification-read-error" class="field-error" role="alert" tabindex="-1">${escapeHtml(inbox.readError)}</p>
+    ${rows ? `<ol class="notification-list" aria-busy="${!!inbox.busy}">${rows}</ol>` : ''}</section>`;
+}
+
+function iosInstallSteps() {
+  return `<ol class="install-steps"><li>แตะ ${icon('share')} แชร์ ใน Safari</li><li>เลือก ${icon('add')} เพิ่มลงในหน้าจอโฮม</li></ol>`;
+}
+
+export function pushSettingsMarkup(device, invite = false) {
+  if (invite && (device.status !== 'off' || device.dismissed)) return '';
+  const enabling = device.busy === 'enable', disabling = device.busy === 'disable';
+  const status = {
+    loading: 'กำลังตรวจสถานะการแจ้งเตือน…',
+    install: 'บน iPhone ต้องเพิ่มแอปลงหน้าจอหลักก่อน',
+    unsupported: 'อุปกรณ์นี้ยังรับแจ้งเตือนไม่ได้ · ดูการแจ้งเตือนได้ที่กระดิ่งในหน้าแรก',
+    denied: 'ปิดการแจ้งเตือนไว้ในตั้งค่าเครื่อง — เปิดได้ที่ตั้งค่าของเบราว์เซอร์/แอป',
+    enabled: 'เครื่องนี้รับแจ้งเตือนแล้ว',
+    off: 'รับแจ้งเตือนเมื่อลูกขาดเรียน ผลใบลา และใบแจ้งค่าธรรมเนียม',
+  };
+  const symbol = { loading: 'hourglass', install: 'phone', unsupported: 'info', denied: 'alert', enabled: 'check', off: 'bell' };
+  return `<section class="data-card push-card" aria-labelledby="push-heading" aria-busy="${!!device.busy}">
+    <div class="install-heading"><span class="install-icon">${icon(symbol[device.status])}</span>
+    <div class="install-copy"><h2 id="push-heading" tabindex="-1">การแจ้งเตือน</h2><p class="helper">${status[device.status]}</p></div>
+    ${invite ? `<button id="dismiss-push" class="button quiet install-dismiss" aria-label="ปิดคำแนะนำเปิดการแจ้งเตือน" ${enabling ? 'disabled' : ''}>${icon('close')}</button>` : ''}</div>
+    ${device.status === 'off' ? `<button id="enable-push" class="button primary full" ${device.busy ? 'disabled' : ''}>${enabling ? busyIcon() + 'กำลังเปิด…' : 'เปิดการแจ้งเตือน'}</button>` : ''}
+    ${device.status === 'enabled' ? `<button id="disable-push" class="button secondary full" ${device.busy ? 'disabled' : ''}>${disabling ? busyIcon() + 'กำลังปิด…' : 'ปิดบนเครื่องนี้'}</button>` : ''}
+    ${device.status === 'install' ? `<details><summary>ดูวิธีเพิ่มลงหน้าจอหลัก</summary>${iosInstallSteps()}</details>` : ''}
+    <p id="push-error" class="field-error" role="alert" tabindex="-1">${escapeHtml(device.error)}</p>
+    </section>`;
+}
+
 // All student data stays in this controller's memory. Epochs discard responses
 // from a previous account/sign-out, including an invite redeemed in another tab.
 export function createController(sb, { changed = () => {}, hash = () => '', redirectTo = '', defer = fn => setTimeout(fn, 0),
-  now = () => new Date(), loadMoney, loadGrades, loadReport, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  now = () => new Date(), loadMoney, loadGrades, loadReport, pushDevice, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   const state = {
     session: null, children: [], loaded: false, loading: false, loadError: '',
     code: '', redeemError: '', redeemBusy: false, lockedUntil: 0,
     loginError: '', loginBusy: false, signoutBusy: false, success: '', resumeNotice: '',
     leaveDraft: null, leaveBusy: false, leaveError: '', cancelBusyId: '', cancelError: '',
+    inbox: null, push: null,
   };
   let epoch = 0, request = 0, mutation = 0, authRevision = 0, subscription, stopped = false;
+  let pendingPush;
+  function resetNotifications() {
+    state.inbox = { ...resource(), loadedAt: 0, pending: null, busy: '', readError: '', revision: 0 };
+    state.push = { status: 'loading', busy: '', error: '', revision: 0 };
+  }
+  resetNotifications();
   const notify = () => { if (!stopped) changed(state, routeFor(state, hash())); };
   let noticeTimer;
   function clearResumeNotice() { clearTimer(noticeTimer); state.resumeNotice = ''; }
@@ -1675,7 +1818,7 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
   } });
   state.read = reads.state;
   const clearPrivateState = () => {
-    reads.reset(); resetLeave(); clearResumeNotice();
+    reads.reset(); resetLeave(); resetNotifications(); clearResumeNotice();
     state.children = []; state.loaded = false; state.loading = false; state.loadError = '';
     state.code = ''; state.redeemError = ''; state.redeemBusy = false; state.lockedUntil = 0;
     state.success = ''; state.loginBusy = false; state.signoutBusy = false;
@@ -1694,14 +1837,18 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
   async function loadChildren() {
     if (!state.session || state.signoutBusy) return;
     const ownEpoch = epoch, ownRequest = ++request;
-    reads.reset(); resetLeave();
+    reads.reset(); resetLeave(); resetNotifications();
     state.children = []; state.loaded = false; state.loading = true; state.loadError = ''; notify();
     try {
       const { data, error } = await sb.rpc('my_children');
       if (ownEpoch !== epoch || ownRequest !== request) return;
       if (error || !Array.isArray(data)) throw error || new Error('Invalid children response');
       state.children = data; state.loaded = true;
-      if (data.length) void reads.load(data);
+      if (data.length) {
+        void reads.load(data);
+        void loadNotifications();
+        void checkPush();
+      }
     } catch {
       if (ownEpoch !== epoch || ownRequest !== request) return;
       state.loadError = 'โหลดรายชื่อลูกไม่สำเร็จ ตรวจอินเทอร์เน็ตแล้วกดลองใหม่';
@@ -1813,12 +1960,95 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
       if (ownEpoch === epoch && ownMutation === mutation) state.cancelError = leaveErrorMessage(error);
     } finally { if (ownEpoch === epoch && ownMutation === mutation) { state.cancelBusyId = ''; notify(); } }
   }
+  function loadNotifications({ quiet = false, force = false } = {}) {
+    const inbox = state.inbox;
+    if (!state.session || state.signoutBusy || !state.children.length || inbox.busy) return;
+    if (inbox.pending) return inbox.pending;
+    if (!force && inbox.loadedAt && now().getTime() - inbox.loadedAt <= 60_000) return;
+    const revision = inbox.revision;
+    const current = () => inbox === state.inbox && revision === inbox.revision;
+    inbox.loading = !quiet && !inbox.loadedAt;
+    if (inbox.loading) notify();
+    inbox.pending = (async () => {
+      try {
+        const { data, error } = await Promise.resolve().then(() => sb.rpc('my_notifications', { p_limit: 50 }));
+        if (error || !Array.isArray(data)) throw Error();
+        if (current()) {
+          inbox.rows = data;
+          inbox.error = '';
+          inbox.loadedAt = now().getTime();
+        }
+      } catch {
+        if (current() && (!quiet || !inbox.loadedAt)) inbox.error = 'โหลดการแจ้งเตือนไม่สำเร็จ ตรวจอินเทอร์เน็ตแล้วลองใหม่';
+      } finally {
+        inbox.loading = false; inbox.pending = null;
+        if (current()) notify();
+      }
+    })();
+    return inbox.pending;
+  }
+  async function readNotifications(id = null) {
+    const inbox = state.inbox;
+    if (!state.session || state.signoutBusy || !state.children.length || inbox.busy) return false;
+    const row = id === null ? null : inbox.rows.find(item => item.id === id);
+    if (id !== null && !row) return false;
+    if (row?.read_at) return true;
+    inbox.busy = id ?? 'all'; inbox.readError = ''; inbox.revision++; notify();
+    try {
+      const { error } = await sb.rpc('mark_notifications_read', { p_ids: id === null ? null : [id] });
+      if (error) throw error;
+      if (inbox !== state.inbox) return false;
+      const readAt = now().toISOString();
+      inbox.rows = inbox.rows.map(item => (!item.read_at && (id === null || item.id === id)) ? { ...item, read_at: readAt } : item);
+      return true;
+    } catch {
+      if (inbox === state.inbox) inbox.readError = notificationsReadError;
+      return false;
+    } finally {
+      if (inbox === state.inbox) { inbox.busy = ''; notify(); }
+    }
+  }
+  async function checkPush() {
+    const device = state.push;
+    if (!pushDevice || !state.session || state.signoutBusy || !state.children.length || device.busy) return;
+    const revision = ++device.revision;
+    const status = await pushDevice.status().catch(() => 'off');
+    if (device !== state.push || revision !== device.revision || status === device.status) return;
+    device.status = status; notify();
+  }
+  function setPush(action) {
+    const device = state.push;
+    if (!pushDevice || !state.session || state.signoutBusy || !state.children.length || device.busy) return;
+    const expected = action === 'enable' ? 'off' : 'enabled';
+    if (device.status !== expected) return;
+    device.busy = action; device.error = ''; device.revision++; notify();
+    const current = () => device === state.push && !state.signoutBusy;
+    const operation = (async () => {
+      try {
+        const status = await pushDevice[action](current);
+        if (current()) device.status = status;
+      } catch (error) {
+        if (current()) device.error = error?.message === pushSetupError ? pushSetupError : (action === 'enable'
+          ? 'เปิดการแจ้งเตือนไม่สำเร็จ ตรวจอินเทอร์เน็ตแล้วลองใหม่'
+          : 'ปิดการแจ้งเตือนไม่สำเร็จ ตรวจอินเทอร์เน็ตแล้วลองใหม่');
+      } finally {
+        if (current()) { device.busy = ''; notify(); }
+      }
+    })();
+    pendingPush = operation;
+    return operation;
+  }
   async function signOut() {
     if (state.signoutBusy || !state.session) return;
     // Clear visible/private data immediately; no pending RPC can restore it.
     epoch++; request++; clearPrivateState(); state.signoutBusy = true; notify();
     const ownEpoch = epoch;
     try {
+      // รอคำสั่งที่เริ่มไปแล้ว เพื่อถอน endpoint ที่เพิ่งสมัครก่อนออกจากบัญชี
+      if (pendingPush) await pendingPush;
+      if (ownEpoch !== epoch) return;
+      if (pushDevice) await pushDevice.disable().catch(() => {});
+      if (ownEpoch !== epoch) return;
       const { error } = await sb.auth.signOut();
       if (ownEpoch !== epoch) return;
       if (error) throw error;
@@ -1835,6 +2065,8 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
     if (stopped || !state.session || state.signoutBusy || !state.loaded || state.loading ||
         state.read.loading || state.leaveDraft || state.leaveBusy || state.cancelBusyId || state.redeemBusy) return;
     const route = routeFor(state, hash());
+    if (['home', 'account'].includes(route)) void checkPush();
+    if (['home', 'notifications'].includes(route)) void loadNotifications({ quiet: true });
     if (!['home', 'child', 'childSection', 'calendar'].includes(route)) return;
     const isChild = route === 'child' || route === 'childSection';
     const { id: studentId, section } = isChild ? childLocation(hash()) : { id: '', section: '' };
@@ -1873,7 +2105,7 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
     }
   }
   return { state, start, signIn, redeem, signOut, loadChildren, acceptSession, notify, submitLeave, cancelLeave,
-    refreshOnReturn, loadChildPage,
+    refreshOnReturn, loadChildPage, loadNotifications, readNotifications, checkPush, setPush,
     beginLeave(id) { if (ownsChild(id) && state.leaveDraft?.studentId !== String(id)) { state.leaveDraft = newLeaveDraft(id); state.leaveError = ''; } },
     discardLeave() { resetLeave(); },
     loadLeaves(id) { if (ownsChild(id)) return reads.loadLeaves(id); },
@@ -2023,7 +2255,7 @@ function childSectionMarkup(child, title, data, subtitle = child.name) {
   </header>`;
 }
 
-export function mountParentApp(sb, win = window, doc = document, initialPrompt = null, updates = null) {
+export function mountParentApp(sb, win = window, doc = document, initialPrompt = null, updates = null, publicKey = VAPID_PUBLIC_KEY) {
   const main = doc.getElementById('main'), account = doc.getElementById('account-bar');
   const app = doc.getElementById('app'), nav = doc.getElementById('bottom-nav');
   const success = doc.getElementById('success-message');
@@ -2033,11 +2265,26 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
   let timetableDay = null;
   const hubScroll = new Map();
   let closeDialog = null;
-  let dismissed = false;
-  try { dismissed = win.localStorage.getItem(INSTALL_DISMISSED_KEY) === '1'; } catch { /* Private mode: session-only preference. */ }
+  const notificationStatus = doc.getElementById('notification-status');
+  let dismissed = false, pushDismissed = false;
+  try {
+    dismissed = win.localStorage.getItem(INSTALL_DISMISSED_KEY) === '1';
+    pushDismissed = win.localStorage.getItem(PUSH_DISMISSED_KEY) === '1';
+  } catch { /* Private mode: session-only preference. */ }
   const standaloneQuery = win.matchMedia('(display-mode: standalone)');
+  const pushDevice = createPushDevice(sb, win, {
+    publicKey,
+    standalone: () => standaloneQuery.matches || win.navigator.standalone === true,
+    async registration() {
+      const service = win.navigator.serviceWorker;
+      if (!service) return null;
+      const scope = new URL('./', win.location.href).href;
+      const own = await (updates?.ready || service.getRegistration(scope));
+      return own?.scope === scope ? own : null;
+    },
+  });
   const controller = createController(sb, {
-    hash: () => win.location.hash,
+    pushDevice, hash: () => win.location.hash,
     redirectTo: win.location.origin + win.location.pathname,
     changed: render,
   });
@@ -2049,7 +2296,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
     if (!kind) return '';
     return `<aside class="install-banner" aria-label="แนะนำติดตั้งแอป">
       <div class="install-heading"><span class="install-icon" aria-hidden="true">${icon('phone')}</span><div class="install-copy"><h2>เพิ่มลงหน้าจอหลัก</h2><p class="helper">เพื่อรับแจ้งเตือนเมื่อลูกขาดเรียน</p></div><button id="dismiss-install" class="button quiet install-dismiss" aria-label="ปิดคำแนะนำติดตั้งแอป">${icon('close')}</button></div>
-      ${kind === 'ios' ? `<ol class="install-steps"><li>แตะ ${icon('share')} แชร์ ใน Safari</li><li>เลือก ${icon('add')} เพิ่มลงในหน้าจอโฮม</li></ol>` : `<button id="install-app" class="button primary full" ${installBusy ? 'disabled' : ''}>${installBusy ? `${busyIcon()}กำลังติดตั้ง…` : 'ติดตั้งแอป'}</button>`}
+      ${kind === 'ios' ? iosInstallSteps() : `<button id="install-app" class="button primary full" ${installBusy ? 'disabled' : ''}>${installBusy ? `${busyIcon()}กำลังติดตั้ง…` : 'ติดตั้งแอป'}</button>`}
       <p class="field-error" role="alert">${escapeHtml(installError)}</p></aside>`;
   }
   function askLeaveConfirmation(title, message, action) {
@@ -2071,6 +2318,24 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
       dialog.querySelector('#keep-leave').addEventListener('click', () => closeDialog(false));
       dialog.querySelector('#confirm-leave').addEventListener('click', () => closeDialog(true));
       dialog.showModal();
+    });
+  }
+  function bindPush(invite) {
+    for (const [id, action] of [['enable-push', 'enable'], ['disable-push', 'disable']]) {
+      main.querySelector('#' + id)?.addEventListener('click', async () => {
+        const device = state.push, view = previousView;
+        await controller.setPush(action);
+        if (device !== state.push || view !== previousView) return;
+        const target = device.error ? '#push-error' : device.status === 'enabled' ? '#disable-push'
+          : device.status === 'off' ? '#enable-push' : '#push-heading';
+        (main.querySelector(target) || main.querySelector(invite ? '#notification-bell' : '#push-heading'))?.focus({ preventScroll: true });
+      });
+    }
+    main.querySelector('#dismiss-push')?.addEventListener('click', () => {
+      pushDismissed = true;
+      try { win.localStorage.setItem(PUSH_DISMISSED_KEY, '1'); } catch { /* ใช้ในหน้านี้ได้ */ }
+      controller.notify();
+      main.querySelector('#notification-bell')?.focus({ preventScroll: true });
     });
   }
   function render(s, route) {
@@ -2104,11 +2369,11 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
     if (previousRoute === 'child' && detailChildId) hubScroll.set(detailChildId, win.scrollY);
     const focusRoute = view !== previousView;
     if (focusRoute) timetableDay = null;
-    const returningHome = route === 'home' && ['child', 'childSection'].includes(previousRoute);
+    const returningHome = route === 'home' && ['child', 'childSection', 'notifications'].includes(previousRoute);
     const returningHub = route === 'child' && ['childSection', 'leave'].includes(previousRoute) && childLocation(previousView).id === id;
     if (previousRoute === 'leave' && view !== previousView && s.leaveDraft) controller.discardLeave();
     previousRoute = route; previousView = view;
-    if (['login', 'home', 'redeem', 'calendar', 'account'].includes(route) && win.location.hash !== `#${route}`) {
+    if (['login', 'home', 'redeem', 'calendar', 'account', 'notifications'].includes(route) && win.location.hash !== `#${route}`) {
       win.history.replaceState(null, '', `#${route}`);
     }
     if (filterAccountId !== s.session?.user?.id) {
@@ -2118,6 +2383,10 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
       hubScroll.clear();
     }
     if (selectedChildId !== null && !s.children.some(child => String(child.student_id) === selectedChildId)) selectedChildId = null;
+    if (notificationStatus) {
+      const announcement = route === 'home' && s.inbox.loadedAt ? unreadLabel(unreadCount(s.inbox)) : '';
+      if (notificationStatus.textContent !== announcement) notificationStatus.textContent = announcement;
+    }
     if (child) lastChildId = id;
     const navChild = s.children.find(row => String(row.student_id) === lastChildId) || s.children[0];
     app.dataset.screen = route;
@@ -2192,16 +2461,20 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
       doc.title = 'วันนี้ — CRS MIS';
       const summary = homeSummary(filterChildren(s.children, selectedChildId), s.read);
       const feed = splitFeed(s.read.feed.rows, s.children, selectedChildId, s.read.today);
-      main.innerHTML = `<section><header class="home-header"><p class="today-date">${escapeHtml(thaiToday())}</p><h1 tabindex="-1">${escapeHtml(guardianGreeting(s.children))}</h1></header>
+      const unread = unreadCount(s.inbox);
+      main.innerHTML = `<section><header class="home-header"><div class="home-heading"><div><p class="today-date">${escapeHtml(thaiToday())}</p><h1 tabindex="-1">${escapeHtml(guardianGreeting(s.children))}</h1></div>
+        <a id="notification-bell" class="notification-bell" href="#notifications" aria-label="${s.inbox.loadedAt ? unreadLabel(unread) : 'แจ้งเตือน'}">${icon('bell')}${unread ? `<span aria-hidden="true">${unread > 9 ? '9+' : unread}</span>` : ''}</a></div></header>
         <div class="child-filters" role="group" aria-label="กรองตามลูก"><button id="child-filter-all" class="filter-chip" aria-pressed="${selectedChildId === null}">ทุกคน</button>
         ${s.children.map((child, index) => `<button id="child-filter-${index}" class="filter-chip" data-child-id="${escapeHtml(child.student_id)}" aria-label="ดูข้อมูลของ ${escapeHtml(child.name)}" aria-pressed="${String(child.student_id) === selectedChildId}">${escapeHtml(firstName(child.nickname || child.name) || 'ลูกของฉัน')}</button>`).join('')}</div>
         <div class="home-content"><div class="summary-grid"><div aria-busy="${summary.attendanceBusy}"><h2>มาเรียนวันนี้</h2><strong>${summary.attendanceBusy ? busyIcon() : ''}${escapeHtml(summary.attendance)}</strong><p>${escapeHtml(summary.attendanceDetail)}</p></div><div aria-busy="${summary.savingsBusy}"><h2>เงินออมรวม</h2><strong>${summary.savingsBusy ? busyIcon() : ''}${escapeHtml(summary.savings)}</strong><p>ของลูกที่เลือก</p></div></div>
+        ${pushSettingsMarkup({ ...s.push, dismissed: pushDismissed }, true)}
         <ul class="children" aria-label="ลูกที่ผูกกับบัญชี">${filterChildren(s.children, selectedChildId).map(child => childMarkup(child, s.children.indexOf(child))).join('')}</ul>
         ${summary.attendance === 'ยังแสดงข้อมูลไม่ได้' || summary.savings === 'ยังแสดงยอดไม่ได้' ? '<button class="button quiet retry-data">ลองโหลดข้อมูลใหม่</button>' : ''}
         <section class="activity-feed" aria-labelledby="today-title" aria-busy="${s.read.feed.loading}"><h2 id="today-title">วันนี้</h2><ol id="today-feed" class="feed-list">${feedMarkup(feed.today, s.children, s.read.today)}</ol>
         ${resourceMarkup(s.read.feed) || (!feed.today.length ? `<div class="feed-empty"><span class="empty-icon">${icon('activity')}</span><h3>ยังไม่มีความเคลื่อนไหว</h3><p>เมื่อครูเช็คชื่อหรือมีรายการชำระ จะขึ้นที่นี่</p></div>` : '')}
         <h2 id="earlier-title">ก่อนหน้านี้</h2><ol id="earlier-feed" class="feed-list" aria-labelledby="earlier-title">${feedMarkup(feed.earlier, s.children, s.read.today)}</ol>${!s.read.feed.loading && !s.read.feed.error && !feed.earlier.length ? '<p class="earlier-empty">ยังไม่มีความเคลื่อนไหวก่อนหน้านี้</p>' : ''}</section>
         <a class="button add-child full" href="#redeem"><span class="add-icon">${icon('plus')}</span>เพิ่มลูกอีกคน</a>${installBanner()}</div></section>`;
+      bindPush(true);
       main.querySelectorAll('.filter-chip').forEach(button => button.addEventListener('click', () => {
         selectedChildId = button.dataset.childId ?? null; controller.notify();
       }));
@@ -2343,14 +2616,37 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
     } else if (route === 'calendar') {
       doc.title = 'ปฏิทิน — CRS MIS';
       main.innerHTML = `<section class="screen-page"><p class="eyebrow">CRS MIS</p><h1 tabindex="-1">ปฏิทิน</h1><div aria-busy="${s.read.calendar.loading}">${calendarMarkup(s.read.calendar)}</div></section>`;
+    } else if (route === 'notifications') {
+      doc.title = 'แจ้งเตือน — CRS MIS';
+      main.innerHTML = notificationsMarkup(s.inbox);
+      main.querySelector('#retry-notifications')?.addEventListener('click', () => controller.loadNotifications({ force: true }));
+      main.querySelector('#read-all-notifications')?.addEventListener('click', async () => {
+        const inbox = state.inbox;
+        await controller.readNotifications();
+        if (inbox === state.inbox && previousView === 'notifications') {
+          main.querySelector(inbox.readError ? '#notification-read-error' : '#read-all-notifications')?.focus({ preventScroll: true });
+        }
+      });
+      main.querySelectorAll('[data-notification-id]').forEach(link => link.addEventListener('click', async event => {
+        event.preventDefault();
+        const inbox = state.inbox, from = win.location.hash;
+        if (inbox.busy) return;
+        const opened = await controller.readNotifications(link.dataset.notificationId);
+        if (inbox !== state.inbox || win.location.hash !== from) return;
+        if (opened) win.location.hash = link.getAttribute('href');
+        else main.querySelector('#notification-read-error')?.focus({ preventScroll: true });
+      }));
+      if (focusRoute && s.inbox.loadedAt && win.setTimeout) win.setTimeout(() => controller.loadNotifications(), 0);
     } else if (route === 'account') {
       doc.title = 'บัญชี — CRS MIS';
       main.innerHTML = `<section class="screen-page account-screen"><p class="eyebrow">CRS MIS</p><h1 tabindex="-1">บัญชี</h1>
         <div class="account-card"><span class="account-avatar">${icon('account')}</span><div><h2>บัญชีที่ใช้อยู่</h2><p class="account-email">${escapeHtml(s.session.user.email || 'ไม่พบอีเมลของบัญชี')}</p></div></div>
         <h2 class="section-title">ลูกที่ผูกกับบัญชี</h2><ul class="linked-children">${s.children.map((child, index) => `<li><span class="avatar tone-${childTone(index)}" aria-hidden="true">${escapeHtml(childInitials(child.name))}</span><div><strong>${escapeHtml(child.name)}</strong><p>คุณเป็น ${escapeHtml(child.relation)}</p></div></li>`).join('')}</ul>
+        ${pushSettingsMarkup(s.push)}
         <a class="privacy-link" href="./privacy.html">นโยบายความเป็นส่วนตัว</a>
         <div class="signout-section"><button id="sign-out" class="button signout full" ${s.signoutBusy ? 'disabled' : ''}>${s.signoutBusy ? `${busyIcon()}กำลังออก…` : 'ออกจากระบบ'}</button></div></section>`;
       main.querySelector('#sign-out').addEventListener('click', controller.signOut);
+      bindPush(false);
     }
     main.querySelectorAll('.retry-data').forEach(button => button.addEventListener('click', () => { void controller.loadData(); }));
     main.querySelectorAll('details').forEach((detail, index) => { detail.open = openDetails[index] || false; });
@@ -2380,7 +2676,15 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
   const onSkip = event => { event.preventDefault(); main.focus(); };
   const onPrompt = event => { event.preventDefault(); deferredPrompt = event; controller.notify(); };
   const onInstalled = () => { deferredPrompt = null; dismissed = true; controller.notify(); };
-  const onStandalone = () => controller.notify();
+  const onStandalone = () => { controller.notify(); void controller.checkPush(); };
+  const onPushClick = event => {
+    if (event.data?.type === 'crs-parent-notification-click') {
+      if (event.data.url) win.location.hash = notificationHref(event.data.url);
+      void controller.loadNotifications({ quiet: true, force: true });
+    }
+  };
+  const serviceWorker = win.navigator.serviceWorker;
+  serviceWorker?.addEventListener?.('message', onPushClick);
   const navResize = new win.ResizeObserver(() => {
     doc.documentElement.style.setProperty('--bottom-nav-height', `${nav.hidden ? 0 : nav.getBoundingClientRect().height}px`);
   });
@@ -2395,6 +2699,8 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
   const onPageHide = () => {
     closeDialog?.(false);
     controller.stop();
+    serviceWorker?.removeEventListener?.('message', onPushClick);
+    if (notificationStatus) notificationStatus.textContent = '';
     selectedChildId = null; filterAccountId = null; lastChildId = null; hubScroll.clear();
     main.replaceChildren(); account.replaceChildren(); nav.replaceChildren(); nav.hidden = true; success.textContent = ''; success.hidden = true;
   };
@@ -2414,6 +2720,8 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
   }
   return { controller, destroy() {
     stopResumeRefresh();
+    serviceWorker?.removeEventListener?.('message', onPushClick);
+    if (notificationStatus) notificationStatus.textContent = '';
     closeDialog?.(false);
     controller.stop(); win.removeEventListener('hashchange', onHash);
     win.removeEventListener('beforeinstallprompt', onPrompt); win.removeEventListener('appinstalled', onInstalled);
@@ -2461,7 +2769,7 @@ export function registerAppServiceWorker(win = window, doc = document) {
     const state = readState();
     if (state?.redeemBusy) submitted = true;
     // รอทั้งการส่งรหัสและการเปิด session เริ่มต้น เพื่อไม่ขัดจังหวะ OAuth callback
-    if (state?.redeemBusy || state?.loginBusy || state?.signoutBusy || state?.leaveBusy || state?.cancelBusyId ||
+    if (state?.redeemBusy || state?.loginBusy || state?.signoutBusy || state?.push?.busy || state?.inbox?.busy || state?.leaveBusy || state?.cancelBusyId ||
         (state?.leaveDraft?.dirty && doc.getElementById('leave-form')) ||
         doc.getElementById('main')?.getAttribute('aria-busy') === 'true') return;
     const input = doc.getElementById('invite-code');
