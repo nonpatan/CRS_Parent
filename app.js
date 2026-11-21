@@ -5,8 +5,8 @@ export const CLIENT_OPTIONS = { auth: {
 } };
 export const INSTALL_DISMISSED_KEY = 'crs-parent-install-dismissed';
 export const MONEY_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/money.js';
-export const GRADES_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/grades.js?v=20261109-2';
-export const REPORT_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/report-card.js?v=20261121-1';
+export const GRADES_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/grades.js?v=20261121-1';
+export const REPORT_MODULE_URL = 'https://nonpatan.github.io/CRS_Score/shared/report-card.js?v=20261121-2';
 
 export function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -45,7 +45,7 @@ export function routeFor({ session, loaded, loading, loadError, children }, hash
   if (/^#child\/[^/]+$/.test(hash)) return 'child';
   if (/^#child\/[^/]+\/[^/]+$/.test(hash)) {
     const { id, section } = childLocation(hash);
-    if (section === 'development' && !supportsDevelopment(children.find(child => String(child.student_id) === id))) return 'childMissing';
+    if (section === 'development' && !hasAcademicReports(children.find(child => String(child.student_id) === id))) return 'childMissing';
     if (Object.hasOwn(childSections, section)) return 'childSection';
   }
   if (hash.startsWith('#child/')) return 'childMissing';
@@ -276,8 +276,9 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       for (const child of children) state.children[child.student_id] = { attendance: resource(), savings: resource(), payments: resource(), leaves: resource(),
         profile: { ...resource(), started: false, refreshing: false },
         attendanceView: { secondary: isSecondary(child), selected: '', entries: new Map() },
-        grades: { secondary: isSecondary(child), started: false, terms: resource(), selected: '', entries: new Map() },
-        development: supportsDevelopment(child) ? { primary: isPrimary(child), terms: resource(), selected: '',
+        grades: hasAcademicReports(child) ? { primary: isPrimary(child), started: false, terms: resource(),
+          selected: '', entries: new Map() } : null,
+        development: hasAcademicReports(child) ? { primary: isPrimary(child), terms: resource(), selected: '',
           currentKey: '', entries: new Map() } : null };
       changed();
     }
@@ -347,7 +348,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       if (finance) jobs.push(fetchRows(target.savings, 'child_savings', args));
       if (finance && page !== 'home') jobs.push(fetchRows(target.payments, 'child_payments', { ...args, p_limit: 50 }));
       if (quiet && page === 'child') {
-        const refreshGrades = target.grades.started && (!section || section === 'grades');
+        const refreshGrades = target.grades?.started && (!section || section === 'grades');
         if (refreshGrades) {
           jobs.push(loadGradeTerms(child.student_id, { force: true }));
         }
@@ -457,7 +458,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
   async function selectGradeTerm(studentId, key) {
     const grades = state.children[studentId]?.grades;
     const term = grades?.terms.rows.find(row => academicTermKey(row) === key);
-    if (!grades?.secondary || !term) return;
+    if (!term) return;
     grades.selected = key;
     // คงชิปและโฟกัสระหว่างรีเฟรช แล้วโหลดภาคล่าสุดที่ผู้ใช้เลือก
     if (grades.terms.loading || grades.entries.has(key)) { changed(); return; }
@@ -480,6 +481,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       if (error || !data || typeof data.released !== 'boolean') throw Error('Invalid grades');
       if (!data.released) { entry.release_date = data.release_date; return; }
       if (String(data.student_id) !== String(studentId)) throw Error('Invalid student');
+      if (grades.primary && academicTermKey(data) !== key) throw Error('Invalid grade term');
       const module = await loadGrades();
       if (!current()) return;
       const input = module.fromGradeRpc(data);
@@ -487,13 +489,20 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       const subjects = module.assembleStudentResults(input).get(data.student_id)?.subjects;
       if (!Array.isArray(subjects)) throw Error('Invalid results');
       // เก็บเฉพาะข้อมูลแสดงผลในหน่วยความจำ ไม่เก็บคะแนนดิบหรือบันทึกภายใน
-      const gpa = module.computeGpa(subjects);
-      entry.gpa = { pending: gpa.pending, gpa: gpa.gpa, pendingReason: gpa.pendingReason };
-      entry.subjects = subjects.map(subject => ({
-        code: subject.subject.code, name: subject.subject.name, credits: subject.creditInfo?.credits,
-        score: module.subjectTotalScore(subject), complete: subject.scoring?.complete !== false,
-        type: subject.result.type, grade: subject.result.grade,
-      }));
+      if (grades.primary) {
+        const report = await loadReport();
+        if (!current()) return;
+        const half = primaryPeriod(term.term);
+        entry.primaryReport = primaryGradeReport(report.primaryReportRows(subjects, { half }), half, subjects);
+      } else {
+        const gpa = module.computeGpa(subjects);
+        entry.gpa = { pending: gpa.pending, gpa: gpa.gpa, pendingReason: gpa.pendingReason };
+        entry.subjects = subjects.map(subject => ({
+          code: subject.subject.code, name: subject.subject.name, credits: subject.creditInfo?.credits,
+          score: module.subjectTotalScore(subject), complete: subject.scoring?.complete !== false,
+          type: subject.result.type, grade: subject.result.grade, sourceLabel: gradeSourceLabel(subject),
+        }));
+      }
       entry.released = true;
     } catch {
       if (current()) entry.error = 'ยังแสดงผลการเรียนไม่ได้ ลองใหม่';
@@ -503,7 +512,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
   }
   async function loadGradeTerms(studentId, { force = false, summary = false } = {}) {
     const child = state.children[studentId], grades = child?.grades;
-    if (!grades?.secondary || (grades.started && !force)) return;
+    if (!grades || (grades.started && !force)) return;
     grades.started = true;
     const ownVersion = version, revision = (revisions.get(grades) || 0) + 1;
     revisions.set(grades, revision);
@@ -531,7 +540,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
   }
   async function loadGradeSummary(studentId) {
     const grades = state.children[studentId]?.grades;
-    if (!grades?.secondary) return;
+    if (!grades) return;
     if (!grades.started) return loadGradeTerms(studentId, { summary: true });
     if (grades.terms.loading || grades.terms.error) return;
     const term = latestReleasedTerm(grades);
@@ -648,7 +657,7 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
 
 function isPrimary(child) { return /^ป\./.test(child?.grade_level || ''); }
 function isSecondary(child) { return /^ม\./.test(child?.grade_level || ''); }
-function supportsDevelopment(child) { return isPrimary(child) || isSecondary(child); }
+function hasAcademicReports(child) { return isPrimary(child) || isSecondary(child); }
 function academicTermKey(term) { return `${term.year}/${term.term}`; }
 function sortAcademicTerms(terms) {
   return terms.slice().sort((a, b) => Number(b.year) - Number(a.year) || Number(b.term) - Number(a.term));
@@ -689,38 +698,100 @@ function reportCompetency({ competencies, competency_results, competency_publish
   return { rows, publishedAt };
 }
 function primaryPeriod(term) { return String(term) === '2' ? 'ปลายปี' : 'กลางปี'; }
-function releaseMessage(term, date, fallback) {
+function primaryAverageLabel(term) { return String(term) === '2' ? 'คะแนนเฉลี่ยทั้งปี' : 'คะแนนเฉลี่ยกลางปี'; }
+function releaseMessage(term, date, fallback, label = `ภาคเรียนที่ ${term.term}/${term.year}`) {
   return validSchoolDate(date)
-    ? `ประกาศผลภาคเรียนที่ ${escapeHtml(term.term)}/${escapeHtml(term.year)} วันที่ ${escapeHtml(thaiDate(date))}` : fallback;
+    ? `ประกาศผล${escapeHtml(label)} วันที่ ${escapeHtml(thaiDate(date))}` : fallback;
 }
-function termChips(terms, selected, kind, label, idFor = (_, index) => index) {
-  return `<div class="grade-terms${kind === 'attendance' ? ' attendance-terms' : ''}" role="group" aria-label="เลือกภาคเรียน">${terms.map((term, index) => {
+function termChips(terms, selected, kind, label, idFor = (_, index) => index, groupLabel = 'เลือกภาคเรียน') {
+  return `<div class="grade-terms${kind === 'attendance' ? ' attendance-terms' : ''}" role="group" aria-label="${groupLabel}">${terms.map((term, index) => {
     const key = academicTermKey(term);
     return `<button id="${kind}-term-${escapeHtml(idFor(term, index))}" class="filter-chip" type="button" data-${kind}-term="${escapeHtml(key)}" aria-pressed="${selected === key}">${escapeHtml(label(term))}</button>`;
   }).join('')}</div>`;
 }
 
+function gradeSourceLabel(item) {
+  const source = item.external?.source;
+  if (source === 'โอน') return 'ผลโอน';
+  if (source === 'สุ่ม') return 'ผลประเมินแทน';
+  return '';
+}
+function gradeSourceMarkup(label) {
+  return label ? `<p class="grade-source"><span>${escapeHtml(label)}</span></p>` : '';
+}
+function primaryGradeReport({ rows, average, allOk, missingPeriods }, half, subjects) {
+  const fullYear = half === 'ปลายปี';
+  const sourceLabels = new Map(subjects.map(item => [item.subject.id, gradeSourceLabel(item)]));
+  const displayRow = row => {
+    const hideMidAndYear = row.missingMemberPeriods || row.external;
+    return {
+      code: row.subject.code, name: row.subject.name, hours: row.hours,
+      mid: hideMidAndYear ? null : row.mid,
+      ...(fullYear ? { end: row.missingMemberPeriods ? null : row.end,
+        year: hideMidAndYear ? null : row.year, result: hideMidAndYear ? null : row.result } : {}),
+    };
+  };
+  return { average, allOk, missingPeriods, rows: rows.map(row => ({
+    ...displayRow(row), sourceLabel: sourceLabels.get(row.subject.id), members: row.members.map(displayRow),
+  })) };
+}
+function primaryScoreMarkup(label, cell) {
+  const value = Number.isFinite(cell?.score) ? cell.score.toFixed(2) : '—';
+  return `<span>${label} <strong>${value}${cell?.ok === false ? '<sup>*</sup>' : ''}</strong></span>`;
+}
+function primaryGradeRowMarkup(row, fullYear, member = false) {
+  const heading = member ? 'h3' : 'h2';
+  const result = row.result?.label;
+  const blocked = ['ร.', 'มส.'].includes(result);
+  const level = fullYear
+    ? `<span>ระดับผล <strong class="${blocked ? 'grade-warning' : ''}">${escapeHtml(result ?? '—')}${result != null && !blocked && row.result.ok === false ? '<sup>*</sup>' : ''}</strong></span>`
+    : primaryScoreMarkup('กลางปี', row.mid);
+  return `<div class="primary-grade-row"><div class="primary-grade-name"><p class="grade-code">${escapeHtml(row.code)}</p>
+    <${heading}>${escapeHtml(row.name)}</${heading}>${gradeSourceMarkup(row.sourceLabel)}${!member && Number.isFinite(row.hours) && row.hours > 0
+      ? `<p class="helper">${row.hours} ชม./ปี</p>` : ''}</div><div class="primary-grade-level">${level}</div></div>
+    ${fullYear ? `<div class="primary-grade-scores">${primaryScoreMarkup('กลางปี', row.mid)}${primaryScoreMarkup('ปลายปี', row.end)}${primaryScoreMarkup('ทั้งปี', row.year)}</div>` : ''}
+    ${blocked ? '<p class="helper primary-grade-contact">ติดต่อครูประจำวิชา</p>' : ''}`;
+}
+function primaryGradesMarkup({ rows, average, allOk, missingPeriods }, term) {
+  const fullYear = primaryPeriod(term.term) === 'ปลายปี';
+  return `<div class="grade-average"><h2>${primaryAverageLabel(term.term)} (ร้อยละ)</h2>
+    ${Number.isFinite(average) ? `<strong>${average.toFixed(2)}${allOk ? '' : '<sup>*</sup>'}</strong>` : '<p>ยังสรุปไม่ได้</p>'}
+    ${missingPeriods.length ? `<p class="helper primary-grade-note">ยังไม่ตั้งคาบเรียน: ${escapeHtml(missingPeriods.join(' · '))}</p>` : ''}
+    ${allOk ? '' : '<p class="helper">* คะแนนยังกรอกไม่ครบ ผลอาจเปลี่ยน</p>'}</div>
+    ${rows.length ? `<ul class="grade-subjects primary-grade-subjects" aria-label="ผลการเรียนรายวิชา">${rows.map(row =>
+      `<li>${primaryGradeRowMarkup(row, fullYear)}${row.members.length
+        ? `<ul class="primary-grade-members" aria-label="วิชาย่อย">${row.members.map(member => `<li>${primaryGradeRowMarkup(member, fullYear, true)}</li>`).join('')}</ul>`
+        : ''}</li>`).join('')}</ul>` : '<p class="data-status">ยังไม่มีผลรายวิชา</p>'}
+    <p class="helper">เฉลี่ยถ่วงด้วยชั่วโมงเรียน · ทั้งปี = (กลางปี + ปลายปี) ÷ 2 · ผลอาจเปลี่ยนได้หากครูแก้ไขคะแนน</p>`;
+}
+
 export function gradesMarkup(child, grades) {
-  if (!isSecondary(child)) return `<p class="data-status">${String(child?.grade_level || '').startsWith('ป.')
-    ? 'ผลการเรียนชั้นประถมจะเปิดให้ดูในแอปเร็ว ๆ นี้' : 'ผลการเรียนระดับชั้นนี้จะเปิดให้ดูในแอปเร็ว ๆ นี้'}</p>`;
+  if (!hasAcademicReports(child)) return '<p class="data-status">ผลการเรียนระดับชั้นนี้จะเปิดให้ดูในแอปเร็ว ๆ นี้</p>';
   const retry = message => `<p class="field-error" role="alert">${escapeHtml(message)}</p><button id="retry-grades" class="button quiet">ลองใหม่</button>`;
   const loading = `<p class="data-status" role="status">${busyIcon()}กำลังโหลดผลการเรียน…</p>`;
   if (!grades || (grades.terms.loading && !grades.terms.rows.length)) return loading;
   if (grades.terms.error) return retry(grades.terms.error);
   if (!grades.terms.rows.length) return '<p class="data-status">ยังไม่มีการประกาศผลการเรียน</p>';
-  const chips = termChips(grades.terms.rows, grades.selected, 'grade', row => `${row.term}/${row.year}`);
+  const primary = isPrimary(child), terms = grades.terms.rows;
+  const multipleYears = primary && new Set(terms.map(row => String(row.year))).size > 1;
+  const chips = primary
+    ? termChips(terms, grades.selected, 'grade', row => `${primaryPeriod(row.term)}${multipleYears ? ' ' + row.year : ''}`,
+      row => `${row.year}-${row.term}`, 'เลือกช่วงปีการศึกษา')
+    : termChips(terms, grades.selected, 'grade', row => `${row.term}/${row.year}`);
   if (grades.terms.loading) return chips + loading;
   const entry = grades.entries.get(grades.selected), term = grades.terms.rows.find(row => academicTermKey(row) === grades.selected);
   if (!entry || entry.loading) return chips + loading;
   if (entry.error) return chips + retry(entry.error);
-  if (!entry.released) return chips + `<p class="data-status">${releaseMessage(term, entry.release_date, 'ยังไม่มีการประกาศผลการเรียน')}</p>`;
+  if (!entry.released) return chips + `<p class="data-status">${releaseMessage(term, entry.release_date, 'ยังไม่มีการประกาศผลการเรียน',
+    primary ? `${primaryPeriod(term.term)} ปีการศึกษา ${term.year}` : undefined)}</p>`;
+  if (primary) return chips + primaryGradesMarkup(entry.primaryReport, term);
   const gpa = entry.gpa;
   return chips + `<div class="grade-average"><h2>เกรดเฉลี่ยภาคเรียน</h2>${gpa.pending
     ? `<p>ยังสรุปเกรดเฉลี่ยไม่ได้</p><p class="helper">${escapeHtml(gpa.pendingReason)}</p>`
     : `<strong>${Number.isFinite(gpa.gpa) ? gpa.gpa.toFixed(2) : '—'}</strong>`}</div>
     ${entry.subjects.length ? `<ul class="grade-subjects" aria-label="ผลการเรียนรายวิชา">${entry.subjects.map(subject => {
       const blocked = ['ร.', 'มส.'].includes(subject.type);
-      return `<li><p class="grade-code">${escapeHtml(subject.code)}</p><h2>${escapeHtml(subject.name)}</h2>
+      return `<li><p class="grade-code">${escapeHtml(subject.code)}</p><h2>${escapeHtml(subject.name)}</h2>${gradeSourceMarkup(subject.sourceLabel)}
         <p class="helper">หน่วยกิต ${escapeHtml(subject.credits ?? '—')}</p><div class="grade-values"><p>คะแนนรวม <strong>${Number.isFinite(subject.score) ? `${escapeHtml(subject.score.toFixed(2))} / 100` : '—'}</strong></p>
         <p>เกรด <strong class="${blocked || !subject.complete ? 'grade-warning' : ''}">${escapeHtml(blocked ? subject.type : !subject.complete ? 'ยังไม่ครบ' : subject.grade ?? '—')}</strong></p></div>
         ${blocked ? '<p class="helper">ติดต่อครูประจำวิชา</p>' : ''}</li>`;
@@ -1044,7 +1115,7 @@ function attendanceTileNote(entry) {
     ? `<span class="tile-warning${danger ? ' danger' : ''}">${icon('alert')}${label(danger, danger || warn)}</span>` : ''}</span>`;
 }
 function developmentTile(child, view, link) {
-  if (!supportsDevelopment(child)) return childTile(childSections.development, 'activity', { detail: 'เปิดให้ดูเร็ว ๆ นี้' });
+  if (!hasAcademicReports(child)) return childTile(childSections.development, 'activity', { detail: 'เปิดให้ดูเร็ว ๆ นี้' });
   const term = latestReleasedTerm(view), entry = term && view.entries.get(academicTermKey(term));
   const busy = !view || view.terms.loading || (term && !view.terms.error && (!entry || entry.loading));
   const activities = entry?.result?.activities;
@@ -1059,15 +1130,28 @@ function developmentTile(child, view, link) {
     <span class="development-tile-slot"><span aria-hidden="true" class="tile-warning-size">${warning(99)}</span>
       ${failed ? `<span class="tile-warning danger">${warning(failed)}</span>` : ''}</span>` });
 }
+function gradeTile(child, grades, href) {
+  if (!hasAcademicReports(child)) return childTile(childSections.grades, 'book', { href, detail: 'เปิดให้ดูเร็ว ๆ นี้' });
+  const term = latestReleasedTerm(grades);
+  const entry = term && grades.entries.get(academicTermKey(term));
+  const busy = !grades || grades.terms.loading || (!!term && !grades.terms.error && (!entry || entry.loading));
+  const primary = isPrimary(child);
+  const average = primary ? entry?.primaryReport?.average : entry?.gpa?.pending ? null : entry?.gpa?.gpa;
+  const value = entry?.released && Number.isFinite(average) ? average.toFixed(2) : '';
+  const error = grades?.terms.error || entry?.error;
+  let detail = error ? 'ยังแสดงผลการเรียนไม่ได้' : 'ยังไม่ประกาศผล';
+  if (!error && entry?.released) {
+    detail = primary
+      ? (value ? `${primaryAverageLabel(term.term)} ${term.year}` : 'ยังสรุปไม่ได้')
+      : (value ? `เกรดเฉลี่ย ภาค ${term.term}/${term.year}` : 'ยังสรุปเกรดเฉลี่ยไม่ได้');
+  }
+  return childTile(childSections.grades, 'book', { href, value, busy, detail });
+}
 export function childTilesMarkup(child, data, read) {
   const currentTerm = attendanceTerms(read.schoolDays, read.today).at(-1);
   const link = childHref(child.student_id), stats = attendanceStats(data?.attendance, read, currentTerm);
   const secondary = isSecondary(child);
   const subjectEntry = currentTerm && data?.attendanceView?.entries.get(academicTermKey(currentTerm));
-  const grades = data?.grades, term = secondary ? latestReleasedTerm(grades) : null;
-  const entry = term && grades.entries.get(academicTermKey(term));
-  const gradeBusy = secondary && (!grades || grades.terms.loading || !!term && (!entry || entry.loading));
-  const gpa = entry?.released && !entry.gpa.pending && Number.isFinite(entry.gpa.gpa) ? entry.gpa.gpa.toFixed(2) : '';
   const balance = savingsBalance(data?.savings, read.money);
   const paid = data?.payments.rows.reduce((latest, row) => validSchoolDate(row.paid_on) && row.paid_on > latest ? row.paid_on : latest, '');
   const profile = loadedProfile(data?.profile), hasHealth = hasHealthData(profile);
@@ -1078,11 +1162,7 @@ export function childTilesMarkup(child, data, read) {
     detail: stats ? [currentTerm ? `ภาค ${currentTerm.term}/${currentTerm.year}` : schoolYearLabel(stats.year), `ขาด ${stats.absent} ลา ${stats.leave} สาย ${stats.late}`].filter(Boolean).join(' · ')
       : data?.attendance.error ? 'ยังแสดงข้อมูลไม่ได้' : 'ยังไม่มีข้อมูล',
     extra: secondary && currentTerm ? attendanceTileNote(subjectEntry) : '',
-  }) + childTile(childSections.grades, 'book', {
-    href: link + '/grades', value: gpa, busy: gradeBusy,
-    detail: !secondary ? 'เปิดให้ดูเร็ว ๆ นี้' : grades?.terms.error || entry?.error ? 'ยังแสดงผลการเรียนไม่ได้'
-      : entry?.released ? (gpa ? `เกรดเฉลี่ย ภาค ${term.term}/${term.year}` : 'ยังสรุปเกรดเฉลี่ยไม่ได้') : 'ยังไม่ประกาศผล',
-  }) + childTile(childSections.money, 'wallet', {
+  }) + gradeTile(child, data?.grades, link + '/grades') + childTile(childSections.money, 'wallet', {
     href: link + '/money', value: balance === null ? '' : baht(balance), busy: !data || data.savings.loading || read.moneyLoading,
     detail: balance === null ? 'ยังแสดงยอดไม่ได้' : data.payments.loading ? 'กำลังโหลดประวัติการชำระ…'
       : data.payments.error ? 'ยังแสดงประวัติการชำระไม่ได้' : validSchoolDate(paid)
@@ -1325,7 +1405,8 @@ export function createController(sb, { changed = () => {}, hash = () => '', redi
     if (section === 'development') return reads.loadDevelopment(id);
     if (section === 'grades') {
       const grades = state.read.children[id]?.grades;
-      if (!grades?.started) return reads.loadGrades(id);
+      if (!grades) return;
+      if (!grades.started) return reads.loadGrades(id);
       if (!grades.terms.loading && !grades.terms.error && grades.selected && !grades.entries.has(grades.selected)) {
         return reads.selectGradeTerm(id, grades.selected);
       }
@@ -1695,7 +1776,9 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
             <section class="data-card" aria-busy="${!data || data.leaves.loading || !!s.cancelBusyId}"><h2 id="leave-heading" tabindex="-1">ใบลา</h2><a class="button primary full" href="#leave/${encodeURIComponent(id)}">ยื่นใบลา</a>${leaveListMarkup(data?.leaves, s.cancelBusyId)}<p class="field-error" role="alert">${escapeHtml(s.cancelError)}</p><button type="button" id="reload-leaves" class="button secondary">โหลดรายการใบลาอีกครั้ง</button></section>
             ${subjectAttendanceMarkup(child, term, data)}`;
         } else if (section === 'grades') {
-          content = `<section class="data-card" aria-label="ผลการเรียน" aria-busy="${isSecondary(child) && (!data || data.grades.terms.loading || !!data.grades.entries.get(data.grades.selected)?.loading)}">${gradesMarkup(child, data?.grades)}</section>`;
+          const grades = data?.grades;
+          const busy = hasAcademicReports(child) && (!grades || grades.terms.loading || !!grades.entries.get(grades.selected)?.loading);
+          content = `<section class="data-card" aria-label="ผลการเรียน" aria-busy="${busy}">${gradesMarkup(child, grades)}</section>`;
         } else if (section === 'development') {
           content = developmentMarkup(data?.development);
         } else if (section === 'money') {

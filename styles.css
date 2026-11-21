@@ -225,9 +225,36 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 .grade-subjects li { min-width: 0; padding-block: 16px; border-top: 1px solid var(--line); }
 .grade-subjects h2 { margin-bottom: 4px; font-size: 1rem; }
 .grade-subjects .grade-code { color: var(--muted); font-size: .8125rem; margin-bottom: 4px; }
+.grade-source { margin: 0 0 4px; }
+.grade-source span {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: var(--teal-soft);
+  color: var(--teal);
+  font-size: .8125rem;
+}
 .grade-values { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 12px; }
 .grade-values p { margin: 0; }
 .grade-warning { display: inline-block; padding: 2px 8px; color: var(--amber); background: var(--amber-soft); border-radius: 8px; }
+.primary-grade-row { display: flex; flex-wrap: wrap; align-items: start; gap: 4px 12px; }
+.primary-grade-name { flex: 1 1 8rem; min-inline-size: 0; overflow-wrap: anywhere; }
+.primary-grade-name .helper { margin: 0; }
+.primary-grade-level { flex: none; margin-inline-start: auto; }
+.primary-grade-level, .primary-grade-scores { color: var(--muted); font-size: .875rem; }
+.primary-grade-level strong { color: var(--ink); font-size: 1.125rem; }
+.primary-grade-level .grade-warning { color: var(--amber); }
+.primary-grade-scores { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; }
+.primary-grade-scores > span { white-space: nowrap; }
+.primary-grade-scores strong { color: var(--ink); }
+.primary-grade-subjects sup, .grade-average sup { margin-inline-start: 1px; }
+.primary-grade-note { overflow-wrap: anywhere; }
+.primary-grade-contact { margin: 6px 0 0; }
+.primary-grade-members { list-style: none; margin: 8px 0 0; padding-inline-start: 12px; border-inline-start: 2px solid var(--line); }
+.primary-grade-members li { padding-block: 8px; }
+.primary-grade-members li:first-child { border-top: 0; }
+.primary-grade-members h3 { margin: 0; font-size: .875rem; }
+.primary-grade-members .primary-grade-level strong { font-size: 1rem; }
 .detail-back { margin-bottom: 18px; }
 .child-screen { padding-top: calc(env(safe-area-inset-top) + 20px); }
 .hub-header, .child-section-header {
