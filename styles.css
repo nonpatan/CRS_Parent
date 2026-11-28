@@ -404,6 +404,13 @@ a.child-tile:active, .hub-children a:active { opacity: .78; }
 .tile-upcoming { border-style: dashed; background: var(--bg); color: var(--muted); }
 .tile-upcoming .tile-icon { color: var(--muted); background: var(--white); }
 .transport-tile.tile-upcoming .tile-value { color: var(--muted); }
+.kg-section-nav { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-block: 12px; }
+.kg-section-nav a {
+  display: flex; flex: 1 1 auto; align-items: center; justify-content: center;
+  min-width: 44px; min-height: 44px; padding: 4px 6px; border-bottom: 2px solid transparent;
+  color: var(--muted); font-size: .875rem; text-align: center; text-decoration: none;
+}
+.kg-section-nav a[aria-current="page"] { color: var(--teal); border-color: var(--teal); font-weight: 700; }
 .child-section-header h1 { margin: 4px 0; }
 .child-section-header > p { font-size: .9375rem; overflow-wrap: anywhere; }
 .child-section-back.button { min-height: 44px; padding: 6px 8px; margin-inline-start: -8px; color: var(--white); }

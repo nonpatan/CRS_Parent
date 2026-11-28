@@ -50,7 +50,9 @@ export function routeFor({ session, loaded, loading, loadError, children }, hash
   if (/^#child\/[^/]+$/.test(hash)) return 'child';
   if (/^#child\/[^/]+\/[^/]+$/.test(hash)) {
     const { id, section } = childLocation(hash);
-    if (section === 'development' && !hasAcademicReports(children.find(child => String(child.student_id) === id))) return 'childMissing';
+    const child = children.find(item => String(item.student_id) === id);
+    if ((section === 'development' && !hasDevelopmentReport(child)) ||
+        (section === 'grades' && isKindergarten(child))) return 'childMissing';
     if (Object.hasOwn(childSections, section)) return 'childSection';
   }
   if (hash.startsWith('#child/')) return 'childMissing';
@@ -293,8 +295,8 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
         attendanceView: { secondary: isSecondary(child), selected: '', entries: new Map() },
         grades: hasAcademicReports(child) ? { primary: isPrimary(child), started: false, terms: resource(),
           selected: '', entries: new Map() } : null,
-        development: hasAcademicReports(child) ? { primary: isPrimary(child), terms: resource(), selected: '',
-          currentKey: '', entries: new Map() } : null };
+        development: hasDevelopmentReport(child) ? { primary: isPrimary(child), kindergarten: isKindergarten(child),
+          terms: resource(), selected: '', currentKey: '', entries: new Map() } : null };
       changed();
     }
     async function fetchRows(target, name, args, selectRows = rows => rows) {
@@ -733,10 +735,10 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
         target.terms.pending = (async () => {
           try {
             const [published] = await Promise.all([
-              publishedTerms(studentId, child, (quiet && refreshTerms) || force), schoolDaysPending,
+              publishedTerms(studentId, child, (quiet && refreshTerms) || force), target.kindergarten ? null : schoolDaysPending,
             ]);
             if (version !== ownVersion) return;
-            const currentTerms = attendanceTerms(state.schoolDays, state.today);
+            const currentTerms = target.kindergarten ? [] : attendanceTerms(state.schoolDays, state.today);
             const terms = new Map(currentTerms.map(term => [academicTermKey(term), { ...term, released: false }]));
             for (const term of published) terms.set(academicTermKey(term), term);
             target.terms.rows = sortAcademicTerms([...terms.values()]);
@@ -797,8 +799,12 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
       if (!data.released) { entry.result = { released: false, release_date: data.release_date }; return; }
       entry.result = null;
       if (academicTermKey(data) !== termKey) throw Error('Invalid report term');
-      const module = await loadReport();
-      if (current()) entry.result = reportExtras(data, target.primary, module);
+      if (target.kindergarten) {
+        entry.result = { released: true, competency: reportCompetency(data) };
+      } else {
+        const module = await loadReport();
+        if (current()) entry.result = reportExtras(data, target.primary, module);
+      }
     } catch {
       if (current() && !entry.result) entry.error = developmentError;
     } finally {
@@ -814,7 +820,9 @@ export function createReadController(sb, { changed = () => {}, leavesChanged = (
 
 function isPrimary(child) { return /^ป\./.test(child?.grade_level || ''); }
 function isSecondary(child) { return /^ม\./.test(child?.grade_level || ''); }
+function isKindergarten(child) { return /^อ\./.test(child?.grade_level || ''); }
 function hasAcademicReports(child) { return isPrimary(child) || isSecondary(child); }
+function hasDevelopmentReport(child) { return isKindergarten(child) || hasAcademicReports(child); }
 function academicTermKey(term) { return `${term.year}/${term.term}`; }
 function sortAcademicTerms(terms) {
   return terms.slice().sort((a, b) => Number(b.year) - Number(a.year) || Number(b.term) - Number(a.term));
@@ -972,8 +980,10 @@ export function developmentMarkup(view) {
   if (!view || (view.terms.loading && !view.terms.rows.length)) return loading;
   const term = developmentTerm(view);
   const multipleYears = new Set(view.terms.rows.map(row => row.year)).size > 1;
-  const chips = term ? termChips(view.terms.rows, academicTermKey(term), 'development', row => view.primary
-    ? `${primaryPeriod(row.term)}${multipleYears ? ' ' + row.year : ''}` : `ภาค ${row.term}/${row.year}`,
+  const chips = term ? termChips(view.terms.rows, academicTermKey(term), 'development', row => {
+    if (view.kindergarten) return `ภาคเรียนที่ ${row.term}/${row.year}`;
+    return view.primary ? `${primaryPeriod(row.term)}${multipleYears ? ' ' + row.year : ''}` : `ภาค ${row.term}/${row.year}`;
+  },
   row => `${row.year}-${row.term}`) : '';
   if (view.terms.loading) return chips + loading;
   if (view.terms.error) return chips + retry;
@@ -984,19 +994,21 @@ export function developmentMarkup(view) {
   const { result } = entry;
   if (!result.released) return chips + `<p class="data-status" role="status">${releaseMessage(term, result.release_date, 'ยังไม่มีการประกาศผล')}</p>`;
   const { comment, activities, traits, competency } = result;
+  const competencyContent = competency
+    ? `${developmentRows(competency.rows)}<p class="helper">บันทึกผลเมื่อ <time datetime="${escapeHtml(competency.publishedAt)}">${escapeHtml(thaiDate(competency.publishedAt))}</time></p>`
+    : '<p class="data-status">ครูยังไม่ได้บันทึกผลสมรรถนะของภาคนี้</p>';
+  const competencyCard = `<section class="data-card"><h2>สมรรถนะสำคัญ</h2>${competencyContent}</section>`;
+  if (view.kindergarten) return chips + competencyCard;
   const activityContent = activities.length ? developmentRows(activities.map(({ name, result }) => ({ name, label: result,
     tone: result === 'ผ่าน' ? 'positive' : result === 'ไม่ผ่าน' ? 'danger' : 'neutral', followUp: result === 'ไม่ผ่าน',
   }))) : '<p class="data-status">ยังไม่มีกิจกรรมในภาคนี้</p>';
   const traitContent = traits.some(trait => trait.level !== null) ? developmentRows(traits.map(({ name, level }) => ({ name,
     label: traitLabels[level] ?? 'ยังไม่ประเมิน', tone: level === null ? 'neutral' : level === 0 ? 'danger' : 'positive',
   }))) : '<p class="data-status">ครูยังไม่ได้ประเมิน</p>';
-  const competencyContent = competency
-    ? `${developmentRows(competency.rows)}<p class="helper">บันทึกผลเมื่อ <time datetime="${escapeHtml(competency.publishedAt)}">${escapeHtml(thaiDate(competency.publishedAt))}</time></p>`
-    : '<p class="data-status">ครูยังไม่ได้บันทึกผลสมรรถนะของภาคนี้</p>';
   return chips + (comment ? `<section class="data-card development-comment"><h2>ความเห็นครูประจำชั้น</h2>
     <p class="development-byline">ครูประจำชั้น · ภาคเรียนที่ ${escapeHtml(term.term)}/${escapeHtml(term.year)}</p><p class="development-message">${escapeHtml(comment)}</p></section>` : '') +
     `<section class="data-card"><h2>กิจกรรมพัฒนาผู้เรียน</h2>${activityContent}</section>
-    <section class="data-card"><h2>สมรรถนะสำคัญ</h2>${competencyContent}</section>
+    ${competencyCard}
     <section class="data-card"><h2>คุณลักษณะอันพึงประสงค์</h2>${traitContent}</section>`;
 }
 
@@ -1573,9 +1585,15 @@ function attendanceTileNote(entry) {
     ? `<span class="tile-warning${danger ? ' danger' : ''}">${icon('alert')}${label(danger, danger || warn)}</span>` : ''}</span>`;
 }
 function developmentTile(child, view, link) {
-  if (!hasAcademicReports(child)) return childTile(childSections.development, 'activity', { detail: 'เปิดให้ดูเร็ว ๆ นี้' });
+  if (!hasDevelopmentReport(child)) return childTile(childSections.development, 'activity', { detail: 'เปิดให้ดูเร็ว ๆ นี้' });
   const term = latestReleasedTerm(view), entry = term && view.entries.get(academicTermKey(term));
   const busy = !view || view.terms.loading || (term && !view.terms.error && (!entry || entry.loading));
+  if (isKindergarten(child)) {
+    const detail = view?.terms.error || entry?.error ? 'ยังแสดงผลไม่ได้'
+      : entry?.result?.competency ? `สมรรถนะสำคัญ · ภาค ${term.term}/${term.year}`
+        : entry?.result?.released ? 'ครูยังไม่ได้บันทึกผลสมรรถนะ' : 'ยังไม่ประกาศผล';
+    return childTile('พัฒนาการ', 'activity', { href: link + '/development', busy, detail });
+  }
   const activities = entry?.result?.activities;
   const failed = activities?.filter(row => row.result === 'ไม่ผ่าน').length || 0;
   const total = (passed, count, semester) => `กิจกรรมผ่าน ${passed}/${count} · ภาค ${semester}`;
@@ -1620,7 +1638,7 @@ export function childTilesMarkup(child, data, read, now = new Date()) {
     detail: stats ? [currentTerm ? `ภาค ${currentTerm.term}/${currentTerm.year}` : schoolYearLabel(stats.year), `ขาด ${stats.absent} ลา ${stats.leave} สาย ${stats.late}`].filter(Boolean).join(' · ')
       : data?.attendance.error ? 'ยังแสดงข้อมูลไม่ได้' : 'ยังไม่มีข้อมูล',
     extra: secondary && currentTerm ? attendanceTileNote(subjectEntry) : '',
-  }) + gradeTile(child, data?.grades, link + '/grades') + childTile(childSections.money, 'wallet', {
+  }) + (isKindergarten(child) ? '' : gradeTile(child, data?.grades, link + '/grades')) + childTile(childSections.money, 'wallet', {
     href: link + '/money', value: balance === null ? '' : baht(balance), busy: !data || data.savings.loading || read.moneyLoading,
     detail: balance === null ? 'ยังแสดงยอดไม่ได้' : data.payments.loading ? 'กำลังโหลดประวัติการชำระ…'
       : data.payments.error ? 'ยังแสดงประวัติการชำระไม่ได้' : validSchoolDate(paid)
@@ -2255,6 +2273,14 @@ function childSectionMarkup(child, title, data, subtitle = child.name) {
   </header>`;
 }
 
+const kindergartenSections = { profile: 'ข้อมูล', attendance: 'เวลาเรียน', development: 'พัฒนาการ', money: 'ค่าใช้จ่าย' };
+function kindergartenSectionNav(child, section) {
+  if (!isKindergarten(child) || !Object.hasOwn(kindergartenSections, section)) return '';
+  return `<nav class="kg-section-nav" aria-label="ดูข้อมูลลูก">${Object.entries(kindergartenSections).map(([key, label]) =>
+    `<a href="${childHref(child.student_id)}/${key}"${key === section ? ' aria-current="page"' : ''}>${label}</a>`
+  ).join('')}</nav>`;
+}
+
 export function mountParentApp(sb, win = window, doc = document, initialPrompt = null, updates = null, publicKey = VAPID_PUBLIC_KEY) {
   const main = doc.getElementById('main'), account = doc.getElementById('account-bar');
   const app = doc.getElementById('app'), nav = doc.getElementById('bottom-nav');
@@ -2498,7 +2524,8 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
     } else if (route === 'child' || route === 'childSection') {
       const data = s.read.children[id];
       if (detailChildId !== id) { detailChildId = id; detailMonth = s.read.today.slice(0, 7); expandedSavings = false; }
-      const sectionTitle = section === 'profile' ? profileLabel(hasHealthData(loadedProfile(data?.profile))) : childSections[section];
+      const sectionTitle = section === 'profile' ? profileLabel(hasHealthData(loadedProfile(data?.profile)))
+        : section === 'development' && isKindergarten(child) ? kindergartenSections.development : childSections[section];
       const title = section ? `${sectionTitle} · ${child.name}` : child.name;
       doc.title = `${title} — CRS MIS`;
       if (!section) {
@@ -2519,6 +2546,10 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
           content = `<section class="data-card" aria-label="ผลการเรียน" aria-busy="${busy}">${gradesMarkup(child, grades)}</section>`;
         } else if (section === 'development') {
           content = developmentMarkup(data?.development);
+          if (isKindergarten(child)) {
+            const term = data?.development && developmentTerm(data.development);
+            subtitle = [child.name, classLabel(child), term && `ปีการศึกษา ${term.year}`].filter(Boolean).join(' · ');
+          }
         } else if (section === 'timetable') {
           const table = data?.timetable?.result;
           subtitle = [table?.classroom, table?.name].filter(Boolean).join(' · ') || child.name;
@@ -2531,7 +2562,7 @@ export function mountParentApp(sb, win = window, doc = document, initialPrompt =
         } else {
           content = profileMarkup(data?.profile);
         }
-        main.innerHTML = `<section class="child-section">${childSectionMarkup(child, sectionTitle, data, subtitle)}<div class="child-section-content">${content}</div></section>`;
+        main.innerHTML = `<section class="child-section">${childSectionMarkup(child, sectionTitle, data, subtitle)}<div class="child-section-content">${kindergartenSectionNav(child, section)}${content}</div></section>`;
       }
       if (data && ['', 'profile', 'grades', 'attendance', 'development', 'timetable', 'transport', 'money'].includes(section)) {
         void Promise.resolve().then(() => controller.loadChildPage(id, section));
